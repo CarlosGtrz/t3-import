@@ -24,4 +24,4 @@ jobs:
       - run: npm pack
       - name: Install packed artifact
         shell: bash
-        run: npm install --global ./t3-import-*.tgz && t3-import --help
+        run: npm install --global ./carlosgtrz-t3-import-*.tgz && t3-import --help

@@ -7,7 +7,7 @@ The first compatibility profile is intentionally strict: **T3 migration 40 only*
 ## Install and run
 
 ```text
-npm install --global t3-import
+npm install --global @carlosgtrz/t3-import
 t3-import
 ```
 

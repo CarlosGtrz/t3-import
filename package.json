@@ -1,7 +1,28 @@
 {
-  "name": "t3-import",
+  "name": "@carlosgtrz/t3-import",
   "version": "0.1.0",
   "description": "Import Codex and Claude Code conversations into T3 Code",
+  "keywords": [
+    "t3code",
+    "codex",
+    "claude-code",
+    "conversation",
+    "importer",
+    "cli",
+    "tui"
+  ],
+  "author": {
+    "name": "CarlosGtrz",
+    "url": "https://github.com/CarlosGtrz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CarlosGtrz/t3-import.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CarlosGtrz/t3-import/issues"
+  },
+  "homepage": "https://github.com/CarlosGtrz/t3-import#readme",
   "type": "module",
   "bin": {
     "t3-import": "dist/cli.js"
@@ -16,12 +37,17 @@
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "release:check": "npm publish --dry-run --access public"
   },
   "engines": {
     "node": ">=22"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
     "commander": "^14.0.0",
