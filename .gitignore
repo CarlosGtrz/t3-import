@@ -1,0 +1,10 @@
+node_modules/
+repos/
+dist/
+coverage/
+.validation-t3-home/
+.e2e-t3-home/
+.final-validation-t3-home/
+backups/
+*.log
+*.tgz
