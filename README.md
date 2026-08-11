@@ -13,6 +13,12 @@ t3-import
 
 Running without a command opens the interactive TUI. It guides you through source, workspace, provider instance, conversation selection, review, confirmation, and results.
 
+## Interactive demo
+
+The example below installs the package, launches `t3-import` without parameters, selects Codex, and imports two simulated conversations into T3 Code.
+
+![Animated t3-import interactive Codex import](https://raw.githubusercontent.com/CarlosGtrz/t3-import/main/assets/t3-import-tui-demo.gif)
+
 Non-interactive examples:
 
 ```text
