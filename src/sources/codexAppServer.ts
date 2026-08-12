@@ -105,7 +105,7 @@ export class CodexAppServerSession {
     const session = new CodexAppServerSession(child, new CodexRpcClient(child), stderr);
     try {
       await session.client.request("initialize", {
-        clientInfo: { name: "t3_import", title: "T3 Import", version: "0.2.1" },
+        clientInfo: { name: "t3_import", title: "T3 Import", version: "0.2.2" },
         capabilities: { experimentalApi: true },
       });
       session.client.notify("initialized", {});

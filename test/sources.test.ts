@@ -1,10 +1,10 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeSource } from "../src/sources/claude.js";
-import { CodexSource } from "../src/sources/codex.js";
+import { CodexSource, inferCurrentWorkspace } from "../src/sources/codex.js";
 
 const originalClaudeHome = process.env.CLAUDE_CONFIG_DIR;
 const originalCodexHome = process.env.CODEX_HOME;
@@ -12,6 +12,7 @@ const originalCodexBin = process.env.CODEX_BIN;
 const originalFakeCodexLog = process.env.FAKE_CODEX_LOG;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (originalClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = originalClaudeHome;
   if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -27,6 +28,35 @@ function jsonl(path: string, rows: unknown[]): void {
 }
 
 describe("source adapters", () => {
+  it("infers the deepest workspace while canonicalizing each unique path once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-workspace-inference-"));
+    const nested = join(root, "nested");
+    const missing = join(root, "historical-missing");
+    mkdirSync(nested);
+    const summary = (id: string, workspace: string) => ({
+      source: "codex" as const,
+      id,
+      title: id,
+      workspace,
+      path: `${id}.jsonl`,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      status: "complete" as const,
+      branches: 1,
+    });
+    const canonicalize = vi.spyOn(realpathSync, "native");
+
+    const inferred = inferCurrentWorkspace([
+      summary("root-1", root),
+      summary("root-duplicate", root),
+      summary("nested", nested),
+      summary("missing", missing),
+    ], nested);
+
+    expect(inferred).toBe(nested);
+    expect(canonicalize).toHaveBeenCalledTimes(4); // cwd + three unique workspace strings
+  });
+
   it("classifies Codex completed, aborted, failed, non-status error, and active turns", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-codex-status-"));
     const workspace = join(root, "workspace");

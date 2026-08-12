@@ -77,7 +77,7 @@ export interface PlannedThread {
 }
 
 export const MAX_SAFE_IMPORT_EVENTS = 900;
-export const IMPORTER_VERSION = "0.2.1";
+export const IMPORTER_VERSION = "0.2.2";
 const MAX_LAST_ERROR_LENGTH = 500;
 
 function settledSession(turn: CanonicalThread["turns"][number]): { status: "ready" | "interrupted" | "error"; lastError: string | null } {

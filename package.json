@@ -1,6 +1,6 @@
 {
   "name": "@carlosgtrz/t3-import",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Import and incrementally sync Codex and Claude Code conversations into T3 Code",
   "keywords": [
     "t3code",

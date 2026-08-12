@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -22,7 +22,6 @@ import {
   deriveTitle,
   isObject,
   isoTimestamp,
-  pathContains,
   stringValue,
   truncate,
   type JsonObject,
@@ -586,9 +585,22 @@ export class CodexSource implements SourceAdapter {
 }
 
 export function inferCurrentWorkspace(summaries: SourceSummary[], cwd = process.cwd()): string | undefined {
-  return summaries
-    .map((summary) => summary.workspace)
-    .filter((workspace, index, all) => all.findIndex((entry) => canonicalPath(entry) === canonicalPath(workspace)) === index)
-    .filter((workspace) => pathContains(workspace, cwd))
-    .sort((left, right) => canonicalPath(right).length - canonicalPath(left).length)[0];
+  const canonicalCwd = canonicalPath(cwd);
+  const canonicalByWorkspace = new Map<string, string>();
+  const uniqueWorkspaces = new Map<string, { workspace: string; canonical: string }>();
+  for (const summary of summaries) {
+    let canonical = canonicalByWorkspace.get(summary.workspace);
+    if (canonical === undefined) {
+      canonical = canonicalPath(summary.workspace);
+      canonicalByWorkspace.set(summary.workspace, canonical);
+    }
+    if (!uniqueWorkspaces.has(canonical)) uniqueWorkspaces.set(canonical, { workspace: summary.workspace, canonical });
+  }
+
+  let selected: { workspace: string; canonical: string } | undefined;
+  for (const candidate of uniqueWorkspaces.values()) {
+    const containsCwd = candidate.canonical === canonicalCwd || canonicalCwd.startsWith(`${candidate.canonical}${sep}`);
+    if (containsCwd && (!selected || candidate.canonical.length > selected.canonical.length)) selected = candidate;
+  }
+  return selected?.workspace;
 }
