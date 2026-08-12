@@ -4,7 +4,16 @@
 
 The first compatibility profile is intentionally strict: **T3 migration 40 only**, Node.js 22 or newer, and local files only. Unknown T3 schemas fail closed.
 
+## How it works
+
+`t3-import` reads local Codex conversations through `codex app-server` and Codex rollout JSONL files. It reads Claude Code sessions from the JSONL files under `~/.claude/projects/`. The source data is normalized into conversations, turns, messages, tool activity, plans, usage, and supported image attachments.
+
+With T3 Code closed, the importer validates the local migration-40 database and creates a verified backup. It then appends canonical events to `orchestration_events` and adds provider-session bindings for conversations that can be resumed. It does not modify T3's projection tables: T3 Code rebuilds them from the imported events the next time it starts.
+
 ## Install and run
+
+> [!WARNING]
+> `t3-import` is experimental and writes directly to T3 Code's local database. Future T3 Code versions may be incompatible even if the tool works today. Close T3 Code before importing, keep the generated backup, and use this tool at your own risk.
 
 ```text
 npm install --global @carlosgtrz/t3-import
