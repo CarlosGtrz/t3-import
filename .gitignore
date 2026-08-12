@@ -6,5 +6,6 @@ coverage/
 .e2e-t3-home/
 .final-validation-t3-home/
 backups/
+artifacts/
 *.log
 *.tgz

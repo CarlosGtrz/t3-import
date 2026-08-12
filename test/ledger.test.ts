@@ -38,6 +38,6 @@ describe("external ledger migration", () => {
     const migrated = new Database(join(directory, "ledger.sqlite"), { readonly: true });
     const columns = (migrated.prepare("PRAGMA table_info(imports)").all() as Array<{ name: string }>).map((row) => row.name);
     migrated.close();
-    expect(columns).toEqual(expect.arrayContaining(["identity_seed", "checkpoint_json", "source_title", "synced_at"]));
+    expect(columns).toEqual(expect.arrayContaining(["identity_seed", "checkpoint_json", "source_title", "synced_at", "is_canonical", "superseded_by_thread_id", "replaced_at"]));
   });
 });

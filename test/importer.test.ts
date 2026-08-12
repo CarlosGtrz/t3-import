@@ -31,7 +31,7 @@ describe("migration-40 writer", () => {
       { ...structuredClone(fixture), id: "turn-failed", status: "failed", terminalError: "provider exploded" },
       { ...activeFixture, id: "turn-active", status: "inProgress" },
     ];
-    const result = await importConversations([{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true });
+    const result = await importConversations([{ conversation: canonicalConversation(workspace, thread), resume: true }], paths, { dryRun: false, resume: true });
     expect(result.results[0]!.warnings).toContainEqual(expect.stringContaining("active provider snapshot"));
     const db = new Database(paths.dbPath, { readonly: true });
     const rows = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.session-set' ORDER BY sequence").all() as Array<{ payload: string }>;
@@ -47,9 +47,9 @@ describe("migration-40 writer", () => {
     mkdirSync(workspace);
     process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
     const paths = createMigration40Target(join(root, "t3"));
-    const selection = { conversation: canonicalConversation(workspace), duplicate: false, resume: true };
+    const selection = { conversation: canonicalConversation(workspace), resume: true };
 
-    const first = await importConversations([selection], paths, { dryRun: false, duplicate: false, resume: true });
+    const first = await importConversations([selection], paths, { dryRun: false, resume: true });
     expect(first.status).toBe("imported");
     expect(first.backup && existsSync(first.backup)).toBe(true);
     const inserted = eventCount(paths.dbPath);
@@ -61,27 +61,17 @@ describe("migration-40 writer", () => {
     expect(JSON.parse(runtime.cursor)).toEqual({ threadId: "11111111-1111-4111-8111-111111111111" });
     db.close();
 
-    const second = await importConversations([selection], paths, { dryRun: false, duplicate: false, resume: true });
+    const second = await importConversations([selection], paths, { dryRun: false, resume: true });
     expect(second.status).toBe("already-imported");
     expect(second.backup).toBeNull();
     expect(eventCount(paths.dbPath)).toBe(inserted);
 
-    const caughtUp = new Database(paths.dbPath);
-    caughtUp.prepare("INSERT INTO projection_state (projector, last_applied_sequence) VALUES (?, ?)")
-      .run("projection.test", inserted);
-    caughtUp.close();
-    const duplicate = await importConversations([{ ...selection, duplicate: true, resume: false }], paths, { dryRun: false, duplicate: true, resume: false });
-    expect(duplicate.status).toBe("imported");
-    expect(duplicate.results[0]!.resumable).toBe(false);
-    const afterDuplicate = new Database(paths.dbPath, { readonly: true });
-    expect((afterDuplicate.prepare("SELECT COUNT(*) count FROM provider_session_runtime").get() as { count: number }).count).toBe(1);
-    afterDuplicate.close();
   });
 
   it("fails closed on unknown migrations", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-schema-"));
     const paths = createMigration40Target(join(root, "t3"), 41);
-    await expect(importConversations([], paths, { dryRun: true, duplicate: false, resume: true }))
+    await expect(importConversations([], paths, { dryRun: true, resume: true }))
       .rejects.toMatchObject({ exitCode: 3 });
   });
 
@@ -94,7 +84,7 @@ describe("migration-40 writer", () => {
     const thread = canonicalThread(workspace);
     thread.turns[0]!.user.attachments.push({ sourceId: "missing", name: "missing.png", mimeType: "image/png", sizeBytes: 10, path: join(root, "does-not-exist.png") });
 
-    await expect(importConversations([{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true }))
+    await expect(importConversations([{ conversation: canonicalConversation(workspace, thread), resume: true }], paths, { dryRun: false, resume: true }))
       .rejects.toMatchObject({ exitCode: 6 });
     expect(eventCount(paths.dbPath)).toBe(0);
   });
@@ -113,9 +103,9 @@ describe("migration-40 writer", () => {
     ];
 
     const result = await importConversations(
-      [{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }],
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
       paths,
-      { dryRun: true, duplicate: false, resume: true },
+      { dryRun: true, resume: true },
     );
     expect(result.results[0]!.activities).toBe(3);
     expect(result.results[0]!.warnings).toContainEqual(expect.stringContaining("Compacted 27 source activities to 3"));
@@ -138,9 +128,9 @@ describe("migration-40 writer", () => {
     }));
 
     await expect(importConversations(
-      [{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }],
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
       paths,
-      { dryRun: true, duplicate: false, resume: true },
+      { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
     expect(eventCount(paths.dbPath)).toBe(0);
   });
@@ -151,13 +141,17 @@ describe("migration-40 writer", () => {
     mkdirSync(workspace);
     process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
     const paths = createMigration40Target(join(root, "t3"));
-    const selection = { conversation: canonicalConversation(workspace), duplicate: false, resume: true };
-    await importConversations([selection], paths, { dryRun: false, duplicate: false, resume: true });
+    const selection = { conversation: canonicalConversation(workspace), resume: true };
+    await importConversations([selection], paths, { dryRun: false, resume: true });
 
+    const another = canonicalThread(workspace);
+    another.sourceSessionId = "22222222-2222-4222-8222-222222222222";
+    another.sourceKey = `codex:${another.sourceSessionId}`;
+    another.resumeCursor = { threadId: another.sourceSessionId };
     await expect(importConversations(
-      [{ ...selection, duplicate: true, resume: false }],
+      [{ conversation: canonicalConversation(workspace, another), resume: true }],
       paths,
-      { dryRun: true, duplicate: true, resume: false },
+      { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("unprojected event") });
   });
 });

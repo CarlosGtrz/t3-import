@@ -9,6 +9,7 @@ import { importConversations } from "../src/target/importer.js";
 import { inspectConversationSync, syncConversations } from "../src/target/sync.js";
 import { canonicalConversation, canonicalThread, createMigration40Target, eventCount } from "./helpers.js";
 import { legacyTurnSemanticHash } from "../src/core/checkpoint.js";
+import { deterministicUuid } from "../src/core/util.js";
 
 let originalLedgerDir: string | undefined;
 
@@ -45,7 +46,7 @@ async function importedFixture(prefix: string): Promise<{ root: string; workspac
   process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
   const paths = createMigration40Target(join(root, "t3"));
   const conversation = canonicalConversation(workspace);
-  await importConversations([{ conversation, duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true });
+  await importConversations([{ conversation, resume: true }], paths, { dryRun: false, resume: true });
   caughtUp(paths);
   return { root, workspace, paths, conversation };
 }
@@ -112,9 +113,9 @@ describe("incremental synchronization", () => {
     second.turns[0]!.user.sourceId = "second-user-1";
     second.turns[0]!.assistant[0]!.sourceId = "second-assistant-1";
     await importConversations([
-      { conversation: canonicalConversation(workspace, first), duplicate: false, resume: true },
-      { conversation: canonicalConversation(workspace, second), duplicate: false, resume: true },
-    ], paths, { dryRun: false, duplicate: false, resume: true });
+      { conversation: canonicalConversation(workspace, first), resume: true },
+      { conversation: canonicalConversation(workspace, second), resume: true },
+    ], paths, { dryRun: false, resume: true });
     caughtUp(paths);
 
     const safe = advancedConversation(workspace, structuredClone(first));
@@ -227,6 +228,47 @@ describe("incremental synchronization", () => {
     expect(result.results[0]).toMatchObject({ status: "synced", turnsAdded: 1 });
   });
 
+  it("recovers a legacy Codex import seeded by the bare session ID", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-sync-legacy-codex-seed-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "legacy-ledger");
+    const paths = createMigration40Target(join(root, "t3"));
+    const legacyThread = canonicalThread(workspace);
+    legacyThread.sourceKey = legacyThread.sourceSessionId;
+    await importConversations([
+      { conversation: canonicalConversation(workspace, legacyThread), resume: true },
+    ], paths, { dryRun: false, resume: true });
+    const imported = new Database(paths.dbPath);
+    for (const [currentKey, legacyKey] of [
+      ["turn.0.user", "turn.0.user-message"],
+      ["turn.0.start", "turn.0.start-requested"],
+      ["turn.0.running", "turn.0.session-running"],
+      ["turn.0.settled", "turn.0.session-ready"],
+    ]) {
+      imported.prepare("UPDATE orchestration_events SET event_id=? WHERE event_id=?").run(
+        deterministicUuid(`t3-import:event:${legacyThread.sourceSessionId}:${legacyKey}`),
+        deterministicUuid(`t3-import:event:${legacyThread.sourceSessionId}:${currentKey}`),
+      );
+    }
+    imported.close();
+    caughtUp(paths);
+
+    // Reproduce a restored T3 database whose external 0.1 ledger is absent,
+    // while current discovery reports the namespaced Codex source key.
+    process.env.T3_IMPORT_DATA_DIR = join(root, "empty-ledger");
+    const current = advancedConversation(workspace);
+    const preview = await inspectConversationSync(current, paths);
+    expect(preview).toMatchObject({ status: "syncable", newTurns: 1, previouslyImported: true });
+
+    const result = await syncConversations([{ conversation: current }], paths, { dryRun: false });
+    expect(result.results[0]).toMatchObject({ status: "synced", turnsAdded: 1 });
+
+    caughtUp(paths);
+    const repeated = await inspectConversationSync(current, paths);
+    expect(repeated).toMatchObject({ status: "up-to-date", previouslyImported: true });
+  });
+
   it("adopts an exact Codex provider turn already written through T3", async () => {
     const { workspace, paths } = await importedFixture("t3-sync-adopt-");
     const conversation = advancedConversation(workspace);
@@ -259,7 +301,7 @@ describe("incremental synchronization", () => {
     const original = canonicalConversation(workspace, initial);
     original.summary.source = "claude";
     original.summary.id = "claude-session";
-    await importConversations([{ conversation: original, duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true });
+    await importConversations([{ conversation: original, resume: true }], paths, { dryRun: false, resume: true });
     caughtUp(paths);
 
     const advanced = structuredClone(initial);
@@ -282,7 +324,7 @@ describe("incremental synchronization", () => {
     expect(conflict.results[0]!.status).toBe("branch-sync-unsupported");
   });
 
-  it("never selects a duplicate Claude transcript as a synchronization target", async () => {
+  it("never selects a noncanonical historical Claude transcript as a synchronization target", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-sync-claude-duplicate-"));
     const workspace = join(root, "workspace");
     mkdirSync(workspace);
@@ -297,7 +339,13 @@ describe("incremental synchronization", () => {
     const conversation = canonicalConversation(workspace, thread);
     conversation.summary.source = "claude";
     conversation.summary.id = thread.sourceSessionId;
-    await importConversations([{ conversation, duplicate: true, resume: false }], paths, { dryRun: false, duplicate: true, resume: false });
+    await importConversations([{ conversation, resume: true }], paths, { dryRun: false, resume: true });
+    const ledger = new Database(join(root, "ledger", "ledger.sqlite"));
+    ledger.prepare("UPDATE imports SET is_canonical=0").run();
+    ledger.close();
+    const target = new Database(paths.dbPath);
+    target.prepare("DELETE FROM provider_session_runtime").run();
+    target.close();
     caughtUp(paths);
 
     const result = await syncConversations([{ conversation }], paths, { dryRun: false });

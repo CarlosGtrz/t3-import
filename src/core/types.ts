@@ -111,7 +111,6 @@ export interface TargetPaths {
 
 export interface ImportSelection {
   conversation: CanonicalConversation;
-  duplicate: boolean;
   resume: boolean;
 }
 
@@ -139,6 +138,7 @@ export interface ImportRunResult {
   target: string;
   migration: number;
   backup: string | null;
+  cache?: CacheResetResult;
   results: ImportItemResult[];
   warnings: string[];
 }
@@ -178,9 +178,73 @@ export interface SyncRunResult {
   target: string;
   migration: number;
   backup: string | null;
+  cache?: CacheResetResult;
   results: SyncItemResult[];
   warnings: string[];
   hasConflicts: boolean;
+}
+
+export interface CacheResetResult {
+  status: "reset" | "not-found";
+  backup: string | null;
+  profile: string | null;
+  entries: string[];
+  warnings: string[];
+}
+
+export interface ReplaceSelection {
+  conversation: CanonicalConversation;
+}
+
+export type ReplaceItemStatus =
+  | "replaced"
+  | "already-current"
+  | "not-imported"
+  | "active-source"
+  | "branch-replace-unsupported"
+  | "target-missing"
+  | "dry-run";
+
+export interface ReplaceItemResult {
+  source: SourceName;
+  sourceId: string;
+  sourceKey: string;
+  status: ReplaceItemStatus;
+  oldThreadId?: string;
+  newThreadId?: string;
+  projectId?: string;
+  title: string;
+  turns: number;
+  events: number;
+  attachments: number;
+  resumeTransferred: boolean;
+  warnings: string[];
+  sequence?: { first: number; last: number };
+}
+
+export interface ReplaceRunResult {
+  schemaVersion: 1;
+  status: "replaced" | "already-current" | "dry-run" | "mixed" | "conflict";
+  target: string;
+  migration: number;
+  backup: string | null;
+  cache?: CacheResetResult;
+  results: ReplaceItemResult[];
+  warnings: string[];
+  hasConflicts: boolean;
+}
+
+export interface ConversationReplacePreview {
+  sourceId: string;
+  status: Exclude<ReplaceItemStatus, "replaced" | "dry-run"> | "replaceable";
+  selectable: boolean;
+  previouslyImported: boolean;
+  turns: number;
+  events: number;
+  attachments: number;
+  oldThreadId?: string;
+  newThreadId?: string;
+  warnings: string[];
 }
 
 export interface SyncSelection {

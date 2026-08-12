@@ -49,7 +49,7 @@ interface SyncPlan {
   adoptionSequence?: number;
 }
 
-interface EventRow {
+export interface EventRow {
   sequence: number;
   eventId: string;
   type: string;
@@ -57,11 +57,11 @@ interface EventRow {
   metadata: Record<string, unknown>;
 }
 
-function targetId(paths: TargetPaths): string {
+export function targetId(paths: TargetPaths): string {
   return sha256(canonicalPath(paths.dbPath));
 }
 
-function readEvents(db: Database.Database, threadId: string): EventRow[] {
+export function readEvents(db: Database.Database, threadId: string): EventRow[] {
   const rows = db.prepare(`
     SELECT sequence, event_id eventId, event_type type, payload_json payload, metadata_json metadata
     FROM orchestration_events WHERE aggregate_kind = 'thread' AND stream_id = ? ORDER BY sequence
@@ -75,11 +75,11 @@ function readEvents(db: Database.Database, threadId: string): EventRow[] {
   });
 }
 
-function createEvent(events: EventRow[]): EventRow | undefined {
+export function createEvent(events: EventRow[]): EventRow | undefined {
   return events.find((row) => row.type === "thread.created");
 }
 
-function currentTitle(db: Database.Database, threadId: string, events: EventRow[]): string {
+export function currentTitle(db: Database.Database, threadId: string, events: EventRow[]): string {
   const table = db.prepare("SELECT 1 found FROM sqlite_master WHERE type='table' AND name='projection_threads'").get();
   if (table) {
     const row = db.prepare("SELECT title FROM projection_threads WHERE thread_id = ? AND deleted_at IS NULL").get(threadId) as { title: string } | undefined;
@@ -94,7 +94,7 @@ function currentTitle(db: Database.Database, threadId: string, events: EventRow[
   return stringValue(createEvent(events)?.payload.title) ?? "Imported conversation";
 }
 
-function existingProvider(db: Database.Database, thread: CanonicalThread, record: StoredLedgerRecord, events: EventRow[]): ProviderSelection {
+export function existingProvider(db: Database.Database, thread: CanonicalThread, record: StoredLedgerRecord, events: EventRow[]): ProviderSelection {
   const runtime = db.prepare(`
     SELECT provider_name providerName, provider_instance_id instanceId, adapter_key adapterKey
     FROM provider_session_runtime WHERE thread_id = ?
@@ -118,14 +118,14 @@ function canonicalMarker(seed: string): string {
   return deterministicUuid(`t3-import:event:${seed}:thread.created`);
 }
 
-function validRecord(db: Database.Database, record: StoredLedgerRecord): boolean {
+export function validRecord(db: Database.Database, record: StoredLedgerRecord): boolean {
   return Boolean(db.prepare(`
     SELECT 1 found FROM orchestration_events
     WHERE stream_id = ? AND event_type = 'thread.created' AND event_id = ? LIMIT 1
   `).get(record.threadId, canonicalMarker(record.identitySeed)));
 }
 
-function fallbackRecord(db: Database.Database, paths: TargetPaths, thread: CanonicalThread): StoredLedgerRecord | undefined {
+export function fallbackRecord(db: Database.Database, paths: TargetPaths, thread: CanonicalThread): StoredLedgerRecord | undefined {
   let threadId: string | undefined;
   let seed = thread.sourceKey;
   if (thread.source === "codex") {
@@ -145,8 +145,19 @@ function fallbackRecord(db: Database.Database, paths: TargetPaths, thread: Canon
   }
   if (!threadId) return undefined;
   const events = readEvents(db, threadId);
-  const created = events.find((row) => row.eventId === canonicalMarker(seed));
+  // Early 0.1 builds used the bare Codex session ID as their deterministic
+  // event seed. Discovery now exposes `codex:<session-id>`, but the imported
+  // stream and provider thread ID remain the bare UUID. Accept both markers
+  // and retain the marker's original seed so checkpoint IDs can be rebuilt.
+  const seeds = thread.source === "codex"
+    ? [thread.sourceKey, thread.sourceSessionId]
+    : [seed];
+  const matched = seeds
+    .map((candidate) => ({ candidate, created: events.find((row) => row.eventId === canonicalMarker(candidate)) }))
+    .find((candidate) => candidate.created);
+  const created = matched?.created;
   if (!created) return undefined;
+  seed = matched!.candidate;
   const projectId = stringValue(created.payload.projectId);
   if (!projectId) return undefined;
   return {
@@ -157,31 +168,75 @@ function fallbackRecord(db: Database.Database, paths: TargetPaths, thread: Canon
     firstSequence: created.sequence, lastSequence: events.at(-1)?.sequence ?? created.sequence,
     resumable: true, backupPath: "", warnings: [], identitySeed: seed,
     currentSourceKey: seed, sourceTitle: stringValue(created.payload.title) ?? thread.title,
+    isCanonical: true,
   };
 }
 
-function findRecord(db: Database.Database, paths: TargetPaths, thread: CanonicalThread): { record?: StoredLedgerRecord; stale: boolean } {
+function replacementMetadataRecord(db: Database.Database, paths: TargetPaths, thread: CanonicalThread): StoredLedgerRecord | undefined {
+  const rows = db.prepare(`
+    SELECT stream_id threadId, sequence, payload_json payload, metadata_json metadata
+    FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND event_type = 'thread.created'
+    ORDER BY sequence DESC
+  `).all() as Array<{ threadId: string; sequence: number; payload: string; metadata: string }>;
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload) as unknown;
+      const metadata = JSON.parse(row.metadata) as unknown;
+      if (!isObject(payload) || !isObject(metadata) || !isObject(metadata.t3Import)) continue;
+      const marker = metadata.t3Import;
+      if (marker.canonical !== true || marker.source !== thread.source || marker.sourceSessionId !== thread.sourceSessionId) continue;
+      const events = readEvents(db, row.threadId);
+      if (events.some((candidate) => candidate.type === "thread.deleted")) continue;
+      const projectId = stringValue(payload.projectId);
+      const identitySeed = stringValue(marker.identitySeed);
+      const sourceKey = stringValue(marker.sourceKey) ?? thread.sourceKey;
+      if (!projectId || !identitySeed) continue;
+      return {
+        targetId: targetId(paths), source: thread.source, sourceSessionId: thread.sourceSessionId,
+        sourceKey, sourceFingerprint: "", projectId, threadId: row.threadId,
+        importedAt: stringValue(payload.createdAt) ?? thread.createdAt, importerVersion: "metadata-recovered",
+        migration: SUPPORTED_MIGRATION, firstSequence: row.sequence,
+        lastSequence: events.at(-1)?.sequence ?? row.sequence, resumable: true, backupPath: "",
+        warnings: ["Recovered canonical replacement identity from T3 event metadata."], identitySeed,
+        currentSourceKey: sourceKey, sourceTitle: stringValue(payload.title) ?? thread.title,
+        isCanonical: true,
+      };
+    } catch { /* continue */ }
+  }
+  return undefined;
+}
+
+export function findRecord(db: Database.Database, paths: TargetPaths, thread: CanonicalThread): { record?: StoredLedgerRecord; stale: boolean } {
   const candidates = listImports(targetId(paths), thread.source).filter((row) => row.sourceSessionId === thread.sourceSessionId);
-  const canonicalCandidates = candidates.filter((row) => row.identitySeed === row.sourceKey);
+  const canonicalCandidates = candidates.filter((row) => row.isCanonical === true || (row.isCanonical === undefined && validRecord(db, row) && row.identitySeed === row.sourceKey));
   const valid = canonicalCandidates.filter((row) => validRecord(db, row));
   if (thread.source === "codex") {
-    const record = valid.find((row) => row.sourceKey === thread.sourceKey && row.threadId === thread.sourceSessionId) ?? fallbackRecord(db, paths, thread);
+    const record = valid.find((row) =>
+      (row.sourceKey === thread.sourceKey || row.currentSourceKey === thread.sourceKey),
+    ) ?? replacementMetadataRecord(db, paths, thread) ?? fallbackRecord(db, paths, thread);
     return { ...(record ? { record } : {}), stale: canonicalCandidates.length > 0 && valid.length === 0 };
   }
   const resumable = valid.find((row) => row.resumable);
-  const record = resumable ?? (valid.length === 1 ? valid[0] : undefined) ?? fallbackRecord(db, paths, thread);
+  const record = resumable ?? (valid.length === 1 ? valid[0] : undefined) ?? replacementMetadataRecord(db, paths, thread) ?? fallbackRecord(db, paths, thread);
   return { ...(record ? { record } : {}), stale: canonicalCandidates.length > 0 && valid.length === 0 };
 }
 
-function bootstrapCheckpoint(thread: CanonicalThread, record: StoredLedgerRecord, events: EventRow[]): { checkpoint: ImportCheckpoint; lastSequence: number } | undefined {
+export function bootstrapCheckpoint(thread: CanonicalThread, record: StoredLedgerRecord, events: EventRow[]): { checkpoint: ImportCheckpoint; lastSequence: number } | undefined {
   const byId = new Map(events.map((row) => [row.eventId, row]));
+  const importedEvent = (...keys: string[]): EventRow | undefined => keys
+    .map((key) => byId.get(deterministicUuid(`t3-import:event:${record.identitySeed}:${key}`)))
+    .find((row) => row !== undefined);
   const turns: ImportCheckpointV2["turns"] = [];
   let lastSequence = record.firstSequence;
   for (const [index, turn] of thread.turns.entries()) {
-    const user = byId.get(deterministicUuid(`t3-import:event:${record.identitySeed}:turn.${index}.user`));
-    const start = byId.get(deterministicUuid(`t3-import:event:${record.identitySeed}:turn.${index}.start`));
-    const running = byId.get(deterministicUuid(`t3-import:event:${record.identitySeed}:turn.${index}.running`));
-    const settled = byId.get(deterministicUuid(`t3-import:event:${record.identitySeed}:turn.${index}.settled`));
+    // The initial one-off Codex importer used longer event-key suffixes. Its
+    // payloads and provider IDs are canonical, so validate them identically
+    // while accepting either deterministic layout.
+    const user = importedEvent(`turn.${index}.user`, `turn.${index}.user-message`);
+    const start = importedEvent(`turn.${index}.start`, `turn.${index}.start-requested`);
+    const running = importedEvent(`turn.${index}.running`, `turn.${index}.session-running`);
+    const settled = importedEvent(`turn.${index}.settled`, `turn.${index}.session-ready`);
     if (!user || !start || !running || !settled) break;
     if (stringValue(user.payload.text) !== turn.user.text || stringValue(running.metadata.providerTurnId) !== turn.id) return undefined;
     const assistant = events
@@ -456,6 +511,7 @@ export async function syncConversations(selections: SyncSelection[], paths: Targ
             sourceTitle: plan.thread.title, checkpoint: plan.checkpoint!, syncedAt: new Date().toISOString(),
             importerVersion: IMPORTER_VERSION, migration: SUPPORTED_MIGRATION,
             lastSequence: last, backupPath: backup ?? record.backupPath, warnings: plan.result.warnings,
+            isCanonical: true,
           });
         }
       })();

@@ -39,6 +39,7 @@ const EVENT_TYPES = [
   "thread.proposed-plan-upserted",
   "thread.activity-appended",
   "thread.meta-updated",
+  "thread.deleted",
 ] as const;
 
 const plannedEventSchema = z.object({
@@ -77,7 +78,7 @@ export interface PlannedThread {
 }
 
 export const MAX_SAFE_IMPORT_EVENTS = 900;
-export const IMPORTER_VERSION = "0.2.2";
+export const IMPORTER_VERSION = "0.3.0";
 const MAX_LAST_ERROR_LENGTH = 500;
 
 function settledSession(turn: CanonicalThread["turns"][number]): { status: "ready" | "interrupted" | "error"; lastError: string | null } {
@@ -162,7 +163,6 @@ export function compactThreadForImport(thread: CanonicalThread): CanonicalThread
 
 export interface ImportOptions extends TargetOverrides {
   dryRun: boolean;
-  duplicate: boolean;
   resume: boolean;
 }
 
@@ -251,6 +251,7 @@ export function planThread(
   fingerprint: string,
   turnOffset = 0,
   includeThreadCreated = true,
+  threadCreatedMetadata: Record<string, unknown> = {},
 ): PlannedThread {
   const events: PlannedEvent[] = projectEvent ? [projectEvent] : [];
   const assets: PlannedAsset[] = [];
@@ -260,7 +261,7 @@ export function planThread(
   const latestAt = thread.updatedAt;
   if (includeThreadCreated) events.push(event(seed, "thread.created", "thread", threadId, "thread.created", thread.createdAt, "server", {
     threadId, projectId, title: thread.title, modelSelection: selection, runtimeMode: "full-access", interactionMode: "default", branch: thread.gitBranch ?? null, worktreePath: null, createdAt: thread.createdAt, updatedAt: thread.createdAt,
-  }));
+  }, threadCreatedMetadata));
   if (includeThreadCreated && !thread.currentBranch) {
     const activityId = deterministicUuid(`t3-import:activity:${seed}:historical-branch`);
     events.push(event(seed, "historical-branch", "thread", threadId, "thread.activity-appended", thread.createdAt, "provider", {
@@ -429,29 +430,27 @@ export async function importConversations(
     const planned: PlannedThread[] = [];
     const projectIds = new Map<string, string>();
     const plannedProjectEvents = new Set<string>();
-    const occurrence = options.duplicate ? randomUUID() : "canonical";
     for (const selection of selections) {
       for (const sourceThread of selection.conversation.threads) {
         const thread = compactThreadForImport(sourceThread);
         if (thread.turns.length === 0) throw writeError(`Conversation ${thread.sourceSessionId} has no terminal turns to import. Use --include-incomplete to import an active snapshot as interrupted history.`);
-        const baseThreadId = thread.source === "codex" && /^[0-9a-f-]{36}$/iu.test(thread.sourceSessionId)
+        const threadId = thread.source === "codex" && /^[0-9a-f-]{36}$/iu.test(thread.sourceSessionId)
           ? thread.sourceSessionId
           : deterministicUuid(`t3-import:thread:${thread.sourceKey}`);
-        const threadId = options.duplicate ? deterministicUuid(`t3-import:duplicate:${thread.sourceKey}:${occurrence}`) : baseThreadId;
-        const imported = !options.duplicate && isImported(db, thread.sourceKey, thread, threadId);
+        const imported = isImported(db, thread.sourceKey, thread, threadId);
         const workspaceKey = canonicalPath(thread.workspace);
         let projectId = projectIds.get(workspaceKey) ?? existingProjectId(db, thread.workspace);
         if (!projectId) projectId = deterministicUuid(`t3-import:project:${workspaceKey}`);
         projectIds.set(workspaceKey, projectId);
         const provider = resolveProviderSelection(paths, thread.source, thread.model, thread.effort, options.providerInstance);
-        const seed = options.duplicate ? `${thread.sourceKey}:${occurrence}` : thread.sourceKey;
+        const seed = thread.sourceKey;
         const projectEvent = !imported && !existingProjectId(db, thread.workspace) && !plannedProjectEvents.has(projectId)
           ? event(`project:${workspaceKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
               projectId, title: basename(thread.workspace), workspaceRoot: thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
             })
           : undefined;
         if (projectEvent) plannedProjectEvents.add(projectId);
-        const resumable = !options.duplicate && options.resume && selection.resume && thread.currentBranch && Boolean(thread.resumeCursor);
+        const resumable = options.resume && selection.resume && thread.currentBranch && Boolean(thread.resumeCursor);
         const plan = planThread(thread, threadId, projectId, paths, provider, seed, projectEvent, resumable, selection.conversation.fingerprint);
         plan.alreadyImported = imported;
         planned.push(plan);
@@ -554,6 +553,7 @@ export async function importConversations(
             identitySeed: plan.thread.sourceKey, currentSourceKey: plan.thread.sourceKey,
             ...(plan.thread.leafId ? { sourceLeafId: plan.thread.leafId } : {}),
             sourceTitle: plan.thread.title, checkpoint: checkpointForThread(plan.thread),
+            isCanonical: true,
           });
         }
       })();
