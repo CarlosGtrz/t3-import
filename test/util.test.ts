@@ -4,8 +4,16 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { canonicalPath, deterministicUuid, pathContains } from "../src/core/util.js";
+import { resolveT3Launch } from "../src/target/launch.js";
 
 describe("core utilities", () => {
+  it("honors the explicit T3 Code executable override", () => {
+    expect(resolveT3Launch({ T3_CODE_BIN: "/opt/t3/T3 Code" }, "linux", "/home/test")).toEqual({
+      command: "/opt/t3/T3 Code",
+      args: [],
+    });
+  });
+
   it("creates stable RFC 4122 UUIDs", () => {
     expect(deterministicUuid("same")).toBe(deterministicUuid("same"));
     expect(deterministicUuid("same")).not.toBe(deterministicUuid("different"));

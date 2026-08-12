@@ -10,3 +10,7 @@ const adapters: Record<SourceName, SourceAdapter> = {
 export function sourceAdapter(name: SourceName): SourceAdapter {
   return adapters[name];
 }
+
+export async function disposeSourceAdapters(): Promise<void> {
+  await Promise.all(Object.values(adapters).map((adapter) => adapter.dispose?.()));
+}

@@ -1,4 +1,4 @@
-export type ExitCode = 2 | 3 | 4 | 5 | 6;
+export type ExitCode = 2 | 3 | 4 | 5 | 6 | 7;
 
 export class ImporterError extends Error {
   constructor(
@@ -18,3 +18,5 @@ export const sourceError = (message: string, details?: unknown) =>
   new ImporterError(message, 5, details);
 export const writeError = (message: string, details?: unknown) =>
   new ImporterError(message, 6, details);
+export const syncConflictError = (message: string, details?: unknown) =>
+  new ImporterError(message, 7, details);

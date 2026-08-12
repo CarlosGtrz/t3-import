@@ -68,7 +68,7 @@ export function canonicalThread(workspace: string): CanonicalThread {
       id: "turn-1",
       startedAt: "2026-01-01T00:00:00.000Z",
       completedAt: "2026-01-01T00:00:03.000Z",
-      complete: true,
+      status: "completed",
       user: { sourceId: "user-1", role: "user", text: "Hello", timestamp: "2026-01-01T00:00:00.000Z", attachments: [] },
       assistant: [{ sourceId: "assistant-1", role: "assistant", text: "Hi", timestamp: "2026-01-01T00:00:02.000Z", attachments: [] }],
       activities: [{ sourceId: "tool-1", tone: "tool", kind: "tool.completed", summary: "Command", timestamp: "2026-01-01T00:00:01.000Z", payload: { itemType: "command_execution", status: "completed", data: { item: { command: "pwd" } } } }],

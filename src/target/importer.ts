@@ -24,6 +24,7 @@ import type {
   TargetPaths,
 } from "../core/types.js";
 import { canonicalPath, deterministicUuid, sha256, truncate } from "../core/util.js";
+import { checkpointForThread } from "../core/checkpoint.js";
 import { safetyError, writeError } from "../core/errors.js";
 import { resolveProviderSelection, type TargetOverrides } from "./config.js";
 import { assertT3Closed, SUPPORTED_MIGRATION, validateTargetDatabase } from "./schema.js";
@@ -37,6 +38,7 @@ const EVENT_TYPES = [
   "thread.session-set",
   "thread.proposed-plan-upserted",
   "thread.activity-appended",
+  "thread.meta-updated",
 ] as const;
 
 const plannedEventSchema = z.object({
@@ -50,18 +52,18 @@ const plannedEventSchema = z.object({
   metadata: z.record(z.string(), z.unknown()),
 });
 
-interface PlannedEvent extends z.infer<typeof plannedEventSchema> {
+export interface PlannedEvent extends z.infer<typeof plannedEventSchema> {
   key: string;
 }
 
-interface PlannedAsset {
+export interface PlannedAsset {
   descriptor: { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number };
   data?: Buffer;
   sourcePath?: string;
   finalPath: string;
 }
 
-interface PlannedThread {
+export interface PlannedThread {
   thread: CanonicalThread;
   threadId: string;
   projectId: string;
@@ -74,10 +76,105 @@ interface PlannedThread {
   fingerprint: string;
 }
 
+export const MAX_SAFE_IMPORT_EVENTS = 900;
+export const IMPORTER_VERSION = "0.2.1";
+const MAX_LAST_ERROR_LENGTH = 500;
+
+function settledSession(turn: CanonicalThread["turns"][number]): { status: "ready" | "interrupted" | "error"; lastError: string | null } {
+  if (turn.status === "completed") return { status: "ready", lastError: null };
+  if (turn.status === "failed") return { status: "error", lastError: truncate(turn.terminalError ?? turn.terminalReason ?? "Imported provider turn failed.", MAX_LAST_ERROR_LENGTH) };
+  return { status: "interrupted", lastError: null };
+}
+
+function activityPriority(activity: CanonicalActivity): number {
+  if (activity.tone === "error" || activity.payload.status === "failed") return 100;
+  switch (activity.payload.itemType) {
+    case "file_change": return 90;
+    case "mcp_tool_call":
+    case "dynamic_tool_call": return 80;
+    case "command_execution": return 70;
+    case "web_search": return 60;
+    case "image_view": return 50;
+    default: return 40;
+  }
+}
+
+function compactTurnActivities(activities: CanonicalActivity[]): CanonicalActivity[] {
+  if (activities.length === 0) return activities;
+  const selected = new Set<number>();
+  let latestReasoning = -1;
+  let latestPlan = -1;
+  let representativeTool = -1;
+  const latestOtherByKind = new Map<string, number>();
+
+  activities.forEach((activity, index) => {
+    if (activity.kind === "context-window.updated") return;
+    if (activity.kind === "reasoning.summary") {
+      latestReasoning = index;
+      return;
+    }
+    if (activity.kind === "turn.plan.updated") {
+      latestPlan = index;
+      return;
+    }
+    if (activity.kind === "tool.completed") {
+      if (
+        representativeTool < 0 ||
+        activityPriority(activity) >= activityPriority(activities[representativeTool]!)
+      ) representativeTool = index;
+      return;
+    }
+    if (
+      activity.kind === "context-compaction" ||
+      activity.tone === "error" ||
+      activity.tone === "approval"
+    ) {
+      selected.add(index);
+      return;
+    }
+    latestOtherByKind.set(activity.kind, index);
+  });
+
+  if (latestReasoning >= 0) selected.add(latestReasoning);
+  if (latestPlan >= 0) selected.add(latestPlan);
+  if (representativeTool >= 0) selected.add(representativeTool);
+  for (const index of latestOtherByKind.values()) selected.add(index);
+  return activities.filter((_activity, index) => selected.has(index));
+}
+
+export function compactThreadForImport(thread: CanonicalThread): CanonicalThread {
+  const turns = thread.turns.map((turn) => ({
+    ...turn,
+    activities: compactTurnActivities(turn.activities),
+  }));
+  const before = thread.turns.reduce((sum, turn) => sum + turn.activities.length, 0);
+  const after = turns.reduce((sum, turn) => sum + turn.activities.length, 0);
+  if (after === before) return { ...thread, turns };
+  return {
+    ...thread,
+    turns,
+    warnings: [
+      ...thread.warnings,
+      `Compacted ${before} source activities to ${after} import activities for T3 startup compatibility.`,
+    ],
+  };
+}
+
 export interface ImportOptions extends TargetOverrides {
   dryRun: boolean;
   duplicate: boolean;
   resume: boolean;
+}
+
+export function projectionBacklog(db: Database.Database): { latestSequence: number; projectedSequence: number; backlog: number } {
+  const latestSequence = Number((db.prepare("SELECT COALESCE(MAX(sequence), 0) value FROM orchestration_events").get() as { value: number }).value);
+  const projected = db.prepare("SELECT MIN(last_applied_sequence) value FROM projection_state").get() as { value: number | null };
+  const projectedSequence = projected.value ?? 0;
+  return {
+    latestSequence,
+    projectedSequence,
+    backlog: Math.max(0, latestSequence - projectedSequence),
+  };
 }
 
 function safeAttachmentSegment(threadId: string): string {
@@ -122,7 +219,7 @@ function planMessageAttachments(
   return { descriptors, assets, text: [message.text, ...notes].filter(Boolean).join("\n\n") };
 }
 
-function event(
+export function event(
   seed: string,
   key: string,
   aggregateKind: "project" | "thread",
@@ -138,11 +235,11 @@ function event(
   return value;
 }
 
-function modelSelection(provider: PlannedThread["provider"]): Record<string, unknown> {
+export function modelSelection(provider: PlannedThread["provider"]): Record<string, unknown> {
   return { instanceId: provider.instanceId, model: provider.model, options: provider.options };
 }
 
-function planThread(
+export function planThread(
   thread: CanonicalThread,
   threadId: string,
   projectId: string,
@@ -152,16 +249,19 @@ function planThread(
   projectEvent: PlannedEvent | undefined,
   resumable: boolean,
   fingerprint: string,
+  turnOffset = 0,
+  includeThreadCreated = true,
 ): PlannedThread {
   const events: PlannedEvent[] = projectEvent ? [projectEvent] : [];
   const assets: PlannedAsset[] = [];
   const warnings = [...thread.warnings, ...(provider.warning ? [provider.warning] : [])];
+  if (thread.turns.some((turn) => turn.status === "inProgress")) warnings.push("Included an active provider snapshot as an interrupted historical turn; it will not be treated as pending in T3.");
   const selection = modelSelection(provider);
   const latestAt = thread.updatedAt;
-  events.push(event(seed, "thread.created", "thread", threadId, "thread.created", thread.createdAt, "server", {
+  if (includeThreadCreated) events.push(event(seed, "thread.created", "thread", threadId, "thread.created", thread.createdAt, "server", {
     threadId, projectId, title: thread.title, modelSelection: selection, runtimeMode: "full-access", interactionMode: "default", branch: thread.gitBranch ?? null, worktreePath: null, createdAt: thread.createdAt, updatedAt: thread.createdAt,
   }));
-  if (!thread.currentBranch) {
+  if (includeThreadCreated && !thread.currentBranch) {
     const activityId = deterministicUuid(`t3-import:activity:${seed}:historical-branch`);
     events.push(event(seed, "historical-branch", "thread", threadId, "thread.activity-appended", thread.createdAt, "provider", {
       threadId,
@@ -170,16 +270,17 @@ function planThread(
   }
 
   thread.turns.forEach((turn, turnIndex) => {
+    const turnNumber = turnOffset + turnIndex;
     const attachmentPlan = planMessageAttachments(turn.user, threadId, paths, warnings);
     assets.push(...attachmentPlan.assets);
     const userMessageId = deterministicUuid(`t3-import:message:${seed}:${turn.id}:user:${turn.user.sourceId}`);
-    events.push(event(seed, `turn.${turnIndex}.user`, "thread", threadId, "thread.message-sent", turn.user.timestamp, "client", {
+    events.push(event(seed, `turn.${turnNumber}.user`, "thread", threadId, "thread.message-sent", turn.user.timestamp, "client", {
       threadId, messageId: userMessageId, role: "user", text: attachmentPlan.text, attachments: attachmentPlan.descriptors, turnId: null, streaming: false, createdAt: turn.user.timestamp, updatedAt: turn.user.timestamp,
     }));
-    events.push(event(seed, `turn.${turnIndex}.start`, "thread", threadId, "thread.turn-start-requested", turn.startedAt, "client", {
+    events.push(event(seed, `turn.${turnNumber}.start`, "thread", threadId, "thread.turn-start-requested", turn.startedAt, "client", {
       threadId, messageId: userMessageId, modelSelection: selection, titleSeed: truncate(turn.user.text, 120), runtimeMode: "full-access", interactionMode: "default", createdAt: turn.startedAt,
     }));
-    events.push(event(seed, `turn.${turnIndex}.running`, "thread", threadId, "thread.session-set", turn.startedAt, "provider", {
+    events.push(event(seed, `turn.${turnNumber}.running`, "thread", threadId, "thread.session-set", turn.startedAt, "provider", {
       threadId,
       session: { threadId, status: "running", providerName: provider.providerName, providerInstanceId: provider.instanceId, runtimeMode: "full-access", activeTurnId: turn.id, lastError: null, updatedAt: turn.startedAt },
     }, { adapterKey: provider.adapterKey, providerTurnId: turn.id }));
@@ -193,29 +294,30 @@ function planThread(
       if (entry.type === "message") {
         const message = entry.value as CanonicalMessage;
         const messageId = deterministicUuid(`t3-import:message:${seed}:${turn.id}:assistant:${message.sourceId}`);
-        events.push(event(seed, `turn.${turnIndex}.entry.${entryIndex}.message`, "thread", threadId, "thread.message-sent", message.timestamp, "provider", {
+        events.push(event(seed, `turn.${turnNumber}.entry.${entryIndex}.message`, "thread", threadId, "thread.message-sent", message.timestamp, "provider", {
           threadId, messageId, role: "assistant", text: message.text, turnId: turn.id, streaming: false, createdAt: message.timestamp, updatedAt: message.timestamp,
         }, { adapterKey: provider.adapterKey, providerTurnId: turn.id }));
       } else if (entry.type === "activity") {
         const activity = entry.value as CanonicalActivity;
         const activityId = deterministicUuid(`t3-import:activity:${seed}:${turn.id}:${activity.sourceId}`);
-        events.push(event(seed, `turn.${turnIndex}.entry.${entryIndex}.activity`, "thread", threadId, "thread.activity-appended", activity.timestamp, "provider", {
+        events.push(event(seed, `turn.${turnNumber}.entry.${entryIndex}.activity`, "thread", threadId, "thread.activity-appended", activity.timestamp, "provider", {
           threadId,
           activity: { id: activityId, tone: activity.tone, kind: activity.kind, summary: activity.summary || "Activity", payload: activity.payload, turnId: turn.id, sequence: entryIndex, createdAt: activity.timestamp },
         }, { adapterKey: provider.adapterKey, providerTurnId: turn.id, providerItemId: activity.sourceId }));
       } else {
         const plan = entry.value as { sourceId: string; markdown: string; timestamp: string };
         const planId = deterministicUuid(`t3-import:plan:${seed}:${turn.id}:${plan.sourceId}`);
-        events.push(event(seed, `turn.${turnIndex}.entry.${entryIndex}.plan`, "thread", threadId, "thread.proposed-plan-upserted", plan.timestamp, "provider", {
+        events.push(event(seed, `turn.${turnNumber}.entry.${entryIndex}.plan`, "thread", threadId, "thread.proposed-plan-upserted", plan.timestamp, "provider", {
           threadId,
           proposedPlan: { id: planId, turnId: turn.id, planMarkdown: plan.markdown, implementedAt: null, implementationThreadId: null, createdAt: plan.timestamp, updatedAt: plan.timestamp },
         }, { adapterKey: provider.adapterKey, providerTurnId: turn.id, providerItemId: plan.sourceId }));
       }
     });
     const settledAt = turn.completedAt ?? turn.assistant.at(-1)?.timestamp ?? turn.user.timestamp;
-    events.push(event(seed, `turn.${turnIndex}.settled`, "thread", threadId, "thread.session-set", settledAt, "provider", {
+    const settled = settledSession(turn);
+    events.push(event(seed, `turn.${turnNumber}.settled`, "thread", threadId, "thread.session-set", settledAt, "provider", {
       threadId,
-      session: { threadId, status: turn.complete ? "ready" : "interrupted", providerName: provider.providerName, providerInstanceId: provider.instanceId, runtimeMode: "full-access", activeTurnId: null, lastError: null, updatedAt: settledAt },
+      session: { threadId, status: settled.status, providerName: provider.providerName, providerInstanceId: provider.instanceId, runtimeMode: "full-access", activeTurnId: null, lastError: settled.lastError, updatedAt: settledAt },
     }, { adapterKey: provider.adapterKey, providerTurnId: turn.id }));
   });
   return { thread, threadId, projectId, provider, events, assets, resumable, warnings, alreadyImported: false, fingerprint };
@@ -247,7 +349,7 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function acquireLock(paths: TargetPaths): () => void {
+export function acquireLock(paths: TargetPaths): () => void {
   const lockPath = join(paths.stateDir, ".t3-import.lock");
   if (existsSync(lockPath)) {
     try {
@@ -268,7 +370,7 @@ function acquireLock(paths: TargetPaths): () => void {
   return () => { try { unlinkSync(lockPath); } catch { /* best effort */ } };
 }
 
-function createBackup(db: Database.Database, paths: TargetPaths): string {
+export function createBackup(db: Database.Database, paths: TargetPaths): string {
   const directory = join(paths.stateDir, "t3-import-backups");
   mkdirSync(directory, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
@@ -282,7 +384,7 @@ function createBackup(db: Database.Database, paths: TargetPaths): string {
   return destination;
 }
 
-function materializeAssets(plans: PlannedThread[], paths: TargetPaths, runId: string): { created: string[]; cleanup(): void } {
+export function materializeAssets(plans: PlannedThread[], paths: TargetPaths, runId: string): { created: string[]; cleanup(): void } {
   const staging = join(paths.attachmentsDir, `.t3-import-staging-${runId}`);
   mkdirSync(staging, { recursive: true });
   const created: string[] = [];
@@ -329,7 +431,9 @@ export async function importConversations(
     const plannedProjectEvents = new Set<string>();
     const occurrence = options.duplicate ? randomUUID() : "canonical";
     for (const selection of selections) {
-      for (const thread of selection.conversation.threads) {
+      for (const sourceThread of selection.conversation.threads) {
+        const thread = compactThreadForImport(sourceThread);
+        if (thread.turns.length === 0) throw writeError(`Conversation ${thread.sourceSessionId} has no terminal turns to import. Use --include-incomplete to import an active snapshot as interrupted history.`);
         const baseThreadId = thread.source === "codex" && /^[0-9a-f-]{36}$/iu.test(thread.sourceSessionId)
           ? thread.sourceSessionId
           : deterministicUuid(`t3-import:thread:${thread.sourceKey}`);
@@ -365,11 +469,29 @@ export async function importConversations(
       turns: plan.thread.turns.length,
       messages: plan.thread.turns.reduce((sum, turn) => sum + 1 + turn.assistant.length, 0),
       activities: plan.thread.turns.reduce((sum, turn) => sum + turn.activities.length, 0) + (plan.thread.currentBranch ? 0 : 1),
+      events: plan.events.length,
       attachments: plan.assets.length,
       resumable: plan.resumable,
       warnings: plan.warnings,
     }));
     const toWrite = planned.filter((plan) => !plan.alreadyImported);
+    if (toWrite.length > 0) {
+      const projection = projectionBacklog(db);
+      if (projection.backlog > 0) {
+        throw safetyError(
+          `T3 has ${projection.backlog} unprojected event${projection.backlog === 1 ? "" : "s"} ` +
+          `(event sequence ${projection.latestSequence}, projection sequence ${projection.projectedSequence}). ` +
+          "Open T3 and let it finish loading before importing more conversations.",
+        );
+      }
+      const plannedEventCount = toWrite.reduce((sum, plan) => sum + plan.events.length, 0);
+      if (plannedEventCount > MAX_SAFE_IMPORT_EVENTS) {
+        throw safetyError(
+          `The compact import would append ${plannedEventCount} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. ` +
+          "Import fewer conversations at a time or select shorter histories.",
+        );
+      }
+    }
     if (options.dryRun || toWrite.length === 0) {
       return { schemaVersion: 1, status: aggregateStatus(results, options.dryRun), target: paths.dbPath, migration: schema.migration, backup: null, results, warnings: runWarnings };
     }
@@ -422,7 +544,17 @@ export async function importConversations(
           }
           const result = results.find((entry) => entry.threadId === plan.threadId)!;
           result.sequence = { first: firstSequence, last: lastSequence };
-          ledger.push({ targetId: sha256(canonicalPath(paths.dbPath)), source: plan.thread.source, sourceSessionId: plan.thread.sourceSessionId, sourceKey: plan.thread.sourceKey, sourceFingerprint: plan.fingerprint, projectId: plan.projectId, threadId: plan.threadId, importedAt: new Date().toISOString(), importerVersion: "0.1.0", migration: SUPPORTED_MIGRATION, firstSequence, lastSequence, resumable: plan.resumable, backupPath: backup!, warnings: plan.warnings });
+          ledger.push({
+            targetId: sha256(canonicalPath(paths.dbPath)), source: plan.thread.source,
+            sourceSessionId: plan.thread.sourceSessionId, sourceKey: plan.thread.sourceKey,
+            sourceFingerprint: plan.fingerprint, projectId: plan.projectId, threadId: plan.threadId,
+            importedAt: new Date().toISOString(), importerVersion: IMPORTER_VERSION,
+            migration: SUPPORTED_MIGRATION, firstSequence, lastSequence,
+            resumable: plan.resumable, backupPath: backup!, warnings: plan.warnings,
+            identitySeed: plan.thread.sourceKey, currentSourceKey: plan.thread.sourceKey,
+            ...(plan.thread.leafId ? { sourceLeafId: plan.thread.leafId } : {}),
+            sourceTitle: plan.thread.title, checkpoint: checkpointForThread(plan.thread),
+          });
         }
       })();
       assets.cleanup();

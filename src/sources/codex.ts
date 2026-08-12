@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import type {
   CanonicalActivity,
   CanonicalConversation,
@@ -8,6 +10,7 @@ import type {
   CanonicalPlan,
   CanonicalThread,
   CanonicalTurn,
+  CanonicalTurnStatus,
   DiscoveryOptions,
   SourceAdapter,
   SourceAttachment,
@@ -26,7 +29,7 @@ import {
 } from "../core/util.js";
 import { sourceError } from "../core/errors.js";
 import { walkFiles } from "./files.js";
-import { listFromCodexAppServer, readFromCodexAppServer, type CodexThreadMetadata } from "./codexAppServer.js";
+import { CodexAppServerSession, type CodexThreadMetadata } from "./codexAppServer.js";
 
 const SYNTHETIC_PREFIXES = ["<recommended_plugins>", "<environment_context>", "<app-context>", "<permissions instructions>"];
 
@@ -34,7 +37,9 @@ interface PendingTurn {
   id: string;
   startedAt: string;
   completedAt?: string;
-  complete: boolean;
+  status: CanonicalTurnStatus;
+  terminalReason?: string;
+  terminalError?: string;
   users: CanonicalMessage[];
   assistant: CanonicalMessage[];
   activities: CanonicalActivity[];
@@ -84,13 +89,36 @@ function newPending(id: string, timestamp: string): PendingTurn {
   return {
     id,
     startedAt: timestamp,
-    complete: false,
+    status: "inProgress",
     users: [],
     assistant: [],
     activities: [],
     plans: [],
     toolCalls: new Map(),
   };
+}
+
+function errorMessage(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (!isObject(value)) return undefined;
+  return stringValue(value.message) ?? stringValue(value.error) ?? stringValue(value.type);
+}
+
+function statusAffectingCodexError(payload: JsonObject): boolean {
+  const info = isObject(payload.codex_error_info) ? payload.codex_error_info : isObject(payload.error_info) ? payload.error_info : undefined;
+  const kind = stringValue(info?.type) ?? stringValue(info?.kind) ?? stringValue(payload.error_type);
+  return kind !== "thread_rollback_failed" && kind !== "active_turn_not_steerable";
+}
+
+function terminalActivity(turn: PendingTurn, sourceId: string, timestamp: string, status: "interrupted" | "failed", detail: string): void {
+  turn.activities.push({
+    sourceId,
+    timestamp,
+    tone: status === "failed" ? "error" : "info",
+    kind: status === "failed" ? "turn.failed" : "turn.interrupted",
+    summary: status === "failed" ? "Turn failed" : "Turn interrupted",
+    payload: { status, detail },
+  });
 }
 
 function contentString(value: unknown): string {
@@ -216,6 +244,16 @@ function parseRows(
     if (!active) active = newPending(id ?? `turn-${recordIndex}`, timestamp);
     return active;
   };
+  const findTurn = (id: string | undefined): PendingTurn | undefined => {
+    if (!id || active?.id === id) return active;
+    return turns.findLast((turn) => turn.id === id);
+  };
+  const settleActive = (turn: PendingTurn): void => {
+    if (turn === active) {
+      turns.push(turn);
+      active = undefined;
+    }
+  };
 
   for (const raw of rows) {
     recordIndex += 1;
@@ -242,11 +280,41 @@ function parseRows(
       if (eventType === "task_started") {
         if (active?.users.length) turns.push(active);
         active = newPending(turnId ?? `turn-${recordIndex}`, isoTimestamp(payload.started_at, timestamp));
-      } else if (eventType === "task_complete" && active) {
-        active.complete = true;
-        active.completedAt = timestamp;
-        turns.push(active);
-        active = undefined;
+      } else if (eventType === "task_complete") {
+        const turn = findTurn(turnId);
+        if (turn) {
+          const embeddedError = errorMessage(payload.error);
+          if (embeddedError) {
+            turn.status = "failed";
+            turn.terminalError = embeddedError;
+            terminalActivity(turn, `task-complete-error:${recordIndex}`, timestamp, "failed", embeddedError);
+          } else if (turn.status === "inProgress" || turn.status === "completed") {
+            turn.status = "completed";
+          }
+          turn.completedAt = timestamp;
+          settleActive(turn);
+        }
+      } else if (eventType === "turn_aborted") {
+        const turn = findTurn(turnId);
+        if (turn) {
+          const reason = stringValue(payload.reason) ?? "interrupted";
+          turn.status = "interrupted";
+          turn.terminalReason = reason;
+          turn.completedAt = timestamp;
+          terminalActivity(turn, `turn-aborted:${recordIndex}`, timestamp, "interrupted", reason);
+          settleActive(turn);
+        }
+      } else if (eventType === "error") {
+        const turn = findTurn(turnId);
+        if (turn) {
+          const detail = errorMessage(payload) ?? "Codex reported an error";
+          turn.activities.push({ sourceId: `error:${recordIndex}`, timestamp, tone: "error", kind: "provider.error", summary: "Provider error", payload: { detail, historical: true } });
+          if (statusAffectingCodexError(payload)) {
+            turn.status = "failed";
+            turn.terminalError = detail;
+            turn.completedAt = timestamp;
+          }
+        }
       } else if (eventType === "agent_reasoning" && active) {
         const detail = reasoningText(payload);
         if (detail) active.activities.push({ sourceId: `event:${recordIndex}`, timestamp, tone: "info", kind: "reasoning.summary", summary: "Reasoning", payload: { detail } });
@@ -317,13 +385,30 @@ function parseRows(
       }
     }
   }
-  if (active?.users.length && includeIncomplete) turns.push(active);
+  if (active?.users.length) turns.push(active);
   if (!sessionId) throw sourceError(`Codex rollout has no session id: ${filePath}`);
   workspace = workspace ?? (appThread ? stringValue(appThread.cwd) : undefined);
   if (!workspace) throw sourceError(`Codex rollout has no workspace: ${filePath}`);
 
+  if (appThread && Array.isArray(appThread.turns)) {
+    for (const rawTurn of appThread.turns) {
+      if (!isObject(rawTurn)) continue;
+      const id = stringValue(rawTurn.id);
+      const turn = id ? turns.find((candidate) => candidate.id === id) : undefined;
+      if (!turn) continue;
+      const status = stringValue(rawTurn.status);
+      if (["completed", "interrupted", "failed", "inProgress"].includes(status ?? "")) turn.status = status as CanonicalTurnStatus;
+      const appError = errorMessage(rawTurn.error);
+      if (appError) turn.terminalError = appError;
+      const reason = stringValue(rawTurn.reason) ?? stringValue(rawTurn.abortReason);
+      if (reason) turn.terminalReason = reason;
+      if (turn.status !== "inProgress" && !turn.completedAt) turn.completedAt = isoTimestamp(rawTurn.completedAt, fallbackTime);
+    }
+  }
+
+  const ignoredInProgressTurns = turns.filter((turn) => turn.status === "inProgress" && turn.users.length > 0).length;
   const canonicalTurns: CanonicalTurn[] = turns.flatMap((turn) => {
-    if (!turn.complete && !includeIncomplete) return [];
+    if (turn.status === "inProgress" && !includeIncomplete) return [];
     if (turn.users.length === 0) return [];
     const [first, ...rest] = turn.users;
     const user: CanonicalMessage = {
@@ -331,79 +416,155 @@ function parseRows(
       text: [first!.text, ...rest.map((entry) => entry.text)].filter(Boolean).join("\n\n"),
       attachments: turn.users.flatMap((entry) => entry.attachments).slice(0, 8),
     };
-    return [{ id: turn.id, startedAt: turn.startedAt, ...(turn.completedAt ? { completedAt: turn.completedAt } : {}), complete: turn.complete, user, assistant: turn.assistant, activities: turn.activities, plans: turn.plans }];
+    return [{ id: turn.id, startedAt: turn.startedAt, ...(turn.completedAt ? { completedAt: turn.completedAt } : {}), status: turn.status, ...(turn.terminalReason ? { terminalReason: turn.terminalReason } : {}), ...(turn.terminalError ? { terminalError: turn.terminalError } : {}), user, assistant: turn.assistant, activities: turn.activities, plans: turn.plans }];
   });
-  if (canonicalTurns.length === 0) throw sourceError(`No importable Codex turns in ${filePath}`);
-  const first = canonicalTurns[0]!;
-  const last = canonicalTurns.at(-1)!;
+  const allWithUsers = turns.filter((turn) => turn.users.length > 0);
+  if (allWithUsers.length === 0) throw sourceError(`No importable Codex turns in ${filePath}`);
+  const firstCanonical = canonicalTurns[0];
+  const firstPending = allWithUsers[0]!;
+  const lastCanonical = canonicalTurns.at(-1);
+  const lastPending = allWithUsers.at(-1)!;
+  const firstUserText = firstCanonical?.user.text ?? firstPending.users[0]!.text;
+  const lastUpdatedAt = lastCanonical
+    ? lastCanonical.completedAt ?? lastCanonical.assistant.at(-1)?.timestamp ?? lastCanonical.user.timestamp
+    : lastPending.completedAt ?? lastPending.assistant.at(-1)?.timestamp ?? lastPending.users.at(-1)!.timestamp;
+  const name = appThread && stringValue(appThread.name);
   const preview = appThread && stringValue(appThread.preview);
   return {
     source: "codex",
     sourceSessionId: sessionId,
     sourceKey: `codex:${sessionId}`,
     currentBranch: true,
-    title: preview ? deriveTitle(preview) : deriveTitle(first.user.text),
+    title: name ?? (preview ? deriveTitle(preview) : deriveTitle(firstUserText)),
     workspace,
     ...(gitBranch ? { gitBranch } : {}),
     model: appThread && stringValue(appThread.model) || model,
     ...(effort ? { effort } : {}),
     createdAt: startedAt,
-    updatedAt: last.completedAt ?? last.assistant.at(-1)?.timestamp ?? last.user.timestamp,
+    updatedAt: lastUpdatedAt,
     turns: canonicalTurns,
+    ignoredInProgressTurns,
     resumeCursor: { threadId: sessionId },
     warnings: [],
   };
 }
 
-async function rawSummaries(options: DiscoveryOptions): Promise<{ summaries: SourceSummary[]; rowsById: Map<string, string> }> {
+interface RolloutHeader {
+  id: string;
+  workspace: string;
+  createdAt: string;
+  child: boolean;
+}
+
+async function readRolloutHeader(path: string, fallbackTime: string): Promise<RolloutHeader | undefined> {
+  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
+  try {
+    let inspected = 0;
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      inspected += 1;
+      try {
+        const row = JSON.parse(line) as unknown;
+        if (isObject(row) && row.type === "session_meta" && isObject(row.payload)) {
+          const id = stringValue(row.payload.id) ?? stringValue(row.payload.session_id);
+          const workspace = stringValue(row.payload.cwd);
+          if (id && workspace) {
+            const threadSource = stringValue(row.payload.thread_source);
+            return { id, workspace, createdAt: isoTimestamp(row.payload.timestamp, isoTimestamp(row.timestamp, fallbackTime)), child: Boolean(threadSource && threadSource !== "user") };
+          }
+        }
+      } catch { /* selected loads report malformed JSONL precisely */ }
+      if (inspected >= 32) return undefined;
+    }
+    return undefined;
+  } finally { lines.close(); }
+}
+
+function appTimestamp(value: number | undefined, fallback: string): string {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return new Date(value < 1_000_000_000_000 ? value * 1_000 : value).toISOString();
+}
+
+async function fastSummaries(options: DiscoveryOptions): Promise<SourceSummary[]> {
+  const indexedTitles = new Map<string, string>();
+  const indexedUpdates = new Map<string, string>();
+  try {
+    const index = await readStableJsonl(join(codexRoot(), "session_index.jsonl"));
+    for (const row of index.rows) {
+      if (!isObject(row)) continue;
+      const id = stringValue(row.id);
+      const title = stringValue(row.thread_name);
+      if (id && title) indexedTitles.set(id, title);
+      if (id && row.updated_at !== undefined) indexedUpdates.set(id, isoTimestamp(row.updated_at, new Date(0).toISOString()));
+    }
+  } catch {
+    // Older Codex installations may not have a session index.
+  }
   const files = await walkFiles(join(codexRoot(), "sessions"), ".jsonl");
-  const summaries: SourceSummary[] = [];
-  const rowsById = new Map<string, string>();
-  for (const path of files) {
+  const values = await Promise.all(files.map(async (path): Promise<SourceSummary | undefined> => {
     try {
       const fileStat = await stat(path);
       const fallback = fileStat.mtime.toISOString();
-      const snapshot = await readStableJsonl(path);
-      const thread = parseRows(snapshot.rows, path, fallback, true);
-      if (options.workspace && canonicalPath(thread.workspace) !== canonicalPath(options.workspace)) continue;
-      if (options.since && new Date(thread.updatedAt) < options.since) continue;
-      summaries.push({
+      const header = await readRolloutHeader(path, fallback);
+      if (!header || header.child) return undefined;
+      if (options.workspace && canonicalPath(header.workspace) !== canonicalPath(options.workspace)) return undefined;
+      const updatedAt = indexedUpdates.get(header.id) ?? fallback;
+      if (options.since && new Date(updatedAt) < options.since) return undefined;
+      return {
         source: "codex",
-        id: thread.sourceSessionId,
-        title: thread.title,
-        workspace: thread.workspace,
+        id: header.id,
+        title: indexedTitles.get(header.id) ?? `Codex conversation ${header.id.slice(0, 8)}`,
+        workspace: header.workspace,
         path,
-        createdAt: thread.createdAt,
-        updatedAt: thread.updatedAt,
-        status: thread.turns.at(-1)?.complete ? "complete" : "incomplete",
+        createdAt: header.createdAt,
+        updatedAt,
+        status: "complete",
         branches: 1,
-      });
-      rowsById.set(thread.sourceSessionId, path);
+      };
     } catch {
-      // Discovery is best effort; load reports a selected file's exact error.
+      return undefined;
     }
-  }
-  return { summaries, rowsById };
+  }));
+  return values.filter((value): value is SourceSummary => Boolean(value));
 }
 
 export class CodexSource implements SourceAdapter {
   readonly name = "codex" as const;
   private appMetadata = new Map<string, CodexThreadMetadata>();
+  private appSession: Promise<CodexAppServerSession> | undefined;
+  private metadataWarmup: Promise<void> | undefined;
+
+  private async session(): Promise<CodexAppServerSession> {
+    const pending = this.appSession ??= CodexAppServerSession.connect();
+    try { return await pending; }
+    catch (error) { if (this.appSession === pending) this.appSession = undefined; throw error; }
+  }
+
+  async dispose(): Promise<void> {
+    const pending = this.appSession;
+    this.appSession = undefined;
+    if (pending) {
+      try { await (await pending).close(); } catch { /* unavailable app-server */ }
+    }
+    await this.metadataWarmup?.catch(() => {});
+    this.metadataWarmup = undefined;
+  }
 
   async discover(options: DiscoveryOptions): Promise<SourceSummary[]> {
-    const raw = await rawSummaries(options);
-    try {
-      const app = await listFromCodexAppServer(options.workspace);
-      this.appMetadata = new Map(app.map((entry) => [entry.id, entry]));
-      for (const summary of raw.summaries) {
-        const metadata = this.appMetadata.get(summary.id);
-        if (metadata?.preview) summary.title = deriveTitle(metadata.preview);
-        if (metadata?.parentThreadId) summary.parentId = metadata.parentThreadId;
-      }
-    } catch {
-      this.appMetadata.clear();
+    const summaries = await fastSummaries(options);
+    this.metadataWarmup ??= this.session()
+      .then((session) => session.list(options.workspace))
+      .then((app) => { this.appMetadata = new Map(app.map((entry) => [entry.id, entry])); })
+      .catch(() => { this.appMetadata.clear(); })
+      .finally(() => { this.metadataWarmup = undefined; });
+    for (const summary of summaries) {
+      const metadata = this.appMetadata.get(summary.id);
+      if (metadata?.name) summary.title = metadata.name;
+      else if (metadata?.preview) summary.title = deriveTitle(metadata.preview);
+      if (metadata?.parentThreadId) summary.parentId = metadata.parentThreadId;
+      if (metadata?.updatedAt !== undefined) summary.updatedAt = appTimestamp(metadata.updatedAt, summary.updatedAt);
     }
-    return raw.summaries
+    return summaries
       .filter((summary) => !summary.parentId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
@@ -413,9 +574,10 @@ export class CodexSource implements SourceAdapter {
       const fileStat = await stat(summary.path);
       const snapshot = await readStableJsonl(summary.path);
       let appThread: Record<string, unknown> | null = this.appMetadata.get(summary.id)?.raw ?? null;
-      try { appThread = await readFromCodexAppServer(summary.id) ?? appThread; } catch { /* raw fallback */ }
+      try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }
       const thread = parseRows(snapshot.rows, summary.path, fileStat.mtime.toISOString(), options.includeIncomplete ?? false, appThread);
-      return { summary: { ...summary, title: thread.title, status: thread.turns.at(-1)?.complete ? "complete" : "incomplete" }, threads: [thread], fingerprint: snapshot.fingerprint };
+      if (!stringValue(appThread?.name)) thread.title = summary.title;
+      return { summary: { ...summary, title: thread.title, status: thread.ignoredInProgressTurns ? "incomplete" : "complete" }, threads: [thread], fingerprint: snapshot.fingerprint };
     } catch (error) {
       if (error instanceof Error && error.name === "ImporterError") throw error;
       throw sourceError(`Unable to load Codex conversation ${summary.id}`, error);

@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { delimiter, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { isObject } from "../core/util.js";
 
@@ -60,65 +62,66 @@ class CodexRpcClient {
   }
 }
 
-async function withClient<T>(operation: (client: CodexRpcClient) => Promise<T>): Promise<T> {
-  const executable = process.env.CODEX_BIN?.trim() || "codex";
-  const child = spawn(executable, ["app-server"], {
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    // Global npm commands on Windows are .cmd shims. cmd.exe performs the
-    // PATHEXT lookup that a direct CreateProcess-style spawn does not.
-    shell: process.platform === "win32",
-  });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-  const client = new CodexRpcClient(child);
-  try {
-    await client.request("initialize", {
-      clientInfo: { name: "t3_import", title: "T3 Import", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
-    });
-    client.notify("initialized", {});
-    return await operation(client);
-  } catch (error) {
-    if (stderr.trim() && error instanceof Error) error.message += `\n${stderr.trim()}`;
-    throw error;
-  } finally {
-    try { child.stdin.end(); } catch { /* process never started */ }
-    if (child.exitCode === null) child.kill();
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null) { resolve(); return; }
-      const timer = setTimeout(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
-        resolve();
-      }, 1_000);
-      timer.unref();
-      child.once("exit", () => { clearTimeout(timer); resolve(); });
-    });
-    child.stdin.destroy();
-    child.stdout.destroy();
-    child.stderr.destroy();
-    child.unref();
+function launchCommand(): { executable: string; shell: boolean } {
+  const configured = process.env.CODEX_BIN?.trim();
+  if (configured) return { executable: configured, shell: process.platform === "win32" && [".cmd", ".bat"].includes(extname(configured).toLowerCase()) };
+  if (process.platform === "win32") {
+    const directories = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+    const executable = directories.map((directory) => join(directory.replace(/^"|"$/gu, ""), "codex.exe")).find(existsSync);
+    if (executable) return { executable, shell: false };
+    const shim = directories.map((directory) => join(directory.replace(/^"|"$/gu, ""), "codex.cmd")).find(existsSync);
+    if (shim) return { executable: shim, shell: true };
   }
+  return { executable: "codex", shell: false };
 }
 
-export interface CodexThreadMetadata {
-  id: string;
-  preview?: string;
-  cwd?: string;
-  model?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  parentThreadId?: string;
-  raw?: Record<string, unknown>;
+async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null) return true;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    child.once("exit", () => { clearTimeout(timer); resolve(true); });
+  });
 }
 
-export async function listFromCodexAppServer(workspace?: string): Promise<CodexThreadMetadata[]> {
-  return withClient(async (client) => {
+export class CodexAppServerSession {
+  private closed = false;
+
+  private constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly client: CodexRpcClient,
+    private readonly stderr: { value: string },
+  ) {}
+
+  static async connect(): Promise<CodexAppServerSession> {
+    const command = launchCommand();
+    const child = spawn(command.executable, ["app-server"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      shell: command.shell,
+    });
+    const stderr = { value: "" };
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr.value += chunk; });
+    const session = new CodexAppServerSession(child, new CodexRpcClient(child), stderr);
+    try {
+      await session.client.request("initialize", {
+        clientInfo: { name: "t3_import", title: "T3 Import", version: "0.2.1" },
+        capabilities: { experimentalApi: true },
+      });
+      session.client.notify("initialized", {});
+      return session;
+    } catch (error) {
+      if (stderr.value.trim() && error instanceof Error) error.message += `\n${stderr.value.trim()}`;
+      await session.close();
+      throw error;
+    }
+  }
+
+  async list(workspace?: string): Promise<CodexThreadMetadata[]> {
     const output: CodexThreadMetadata[] = [];
     let cursor: string | null = null;
     do {
-      const result = await client.request("thread/list", {
+      const result = await this.client.request("thread/list", {
         cursor,
         limit: 100,
         sortKey: "updated_at",
@@ -129,6 +132,7 @@ export async function listFromCodexAppServer(workspace?: string): Promise<CodexT
         if (!isObject(value) || typeof value.id !== "string") continue;
         output.push({
           id: value.id,
+          ...(typeof value.name === "string" && value.name.trim() ? { name: value.name } : {}),
           ...(typeof value.preview === "string" ? { preview: value.preview } : {}),
           ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
           ...(typeof value.model === "string" ? { model: value.model } : {}),
@@ -141,12 +145,48 @@ export async function listFromCodexAppServer(workspace?: string): Promise<CodexT
       cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
     } while (cursor);
     return output;
-  });
+  }
+
+  async read(threadId: string): Promise<Record<string, unknown> | null> {
+    const result = await this.client.request("thread/read", { threadId, includeTurns: true }, 12_000);
+    return isObject(result) && isObject(result.thread) ? result.thread : null;
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    try { this.child.stdin.end(); } catch { /* process never started */ }
+    if (!await waitForExit(this.child, 750) && this.child.exitCode === null) this.child.kill();
+    if (!await waitForExit(this.child, 750) && this.child.exitCode === null) this.child.kill("SIGKILL");
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
+    this.child.unref();
+  }
+}
+
+async function withSession<T>(operation: (session: CodexAppServerSession) => Promise<T>): Promise<T> {
+  const session = await CodexAppServerSession.connect();
+  try { return await operation(session); }
+  finally { await session.close(); }
+}
+
+export interface CodexThreadMetadata {
+  id: string;
+  name?: string;
+  preview?: string;
+  cwd?: string;
+  model?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  parentThreadId?: string;
+  raw?: Record<string, unknown>;
+}
+
+export async function listFromCodexAppServer(workspace?: string): Promise<CodexThreadMetadata[]> {
+  return withSession((session) => session.list(workspace));
 }
 
 export async function readFromCodexAppServer(threadId: string): Promise<Record<string, unknown> | null> {
-  return withClient(async (client) => {
-    const result = await client.request("thread/read", { threadId, includeTurns: true }, 12_000);
-    return isObject(result) && isObject(result.thread) ? result.thread : null;
-  });
+  return withSession((session) => session.read(threadId));
 }

@@ -10,10 +10,11 @@ import { z } from "zod";
 import { ImportTui } from "./tui.js";
 import { ImporterError, usageError } from "./core/errors.js";
 import type { ImportRunResult, SourceName, SourceSummary } from "./core/types.js";
-import { sourceAdapter } from "./sources/index.js";
+import { disposeSourceAdapters, sourceAdapter } from "./sources/index.js";
 import { resolveTargetPaths, type TargetOverrides } from "./target/config.js";
-import { importConversations } from "./target/importer.js";
+import { IMPORTER_VERSION, importConversations } from "./target/importer.js";
 import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
+import { inspectConversationSync, syncConversations } from "./target/sync.js";
 
 const sourceSchema = z.enum(["codex", "claude"]);
 const program = new Command();
@@ -39,10 +40,16 @@ async function confirmImport(count: number): Promise<boolean> {
   finally { prompt.close(); }
 }
 
+async function confirmSync(count: number): Promise<boolean> {
+  const prompt = createInterface({ input, output });
+  try { return /^(y|yes)$/iu.test((await prompt.question(`Synchronize ${count} conversation${count === 1 ? "" : "s"} with T3? [y/N] `)).trim()); }
+  finally { prompt.close(); }
+}
+
 program
   .name("t3-import")
-  .description("Import Codex and Claude Code conversations into T3 Code")
-  .version("0.1.0")
+  .description("Import and incrementally sync Codex and Claude Code conversations into T3 Code")
+  .version(IMPORTER_VERSION)
   .option("--t3-home <path>", "T3 home directory")
   .option("--db <path>", "T3 state.sqlite path")
   .option("--attachments-dir <path>", "T3 attachments directory")
@@ -155,10 +162,65 @@ program.command("import")
     print(result);
   });
 
+program.command("sync")
+  .description("Append new completed, interrupted, or failed turns to previously imported conversations")
+  .addOption(new Option("--source <source>", "codex or claude"))
+  .option("--workspace <path>")
+  .option("--thread <id>", "source conversation id (repeatable)", collect, [])
+  .option("--all", "synchronize every previously imported matching conversation")
+  .option("--since <date>", "ISO date/time")
+  .option("--dry-run")
+  .option("--yes")
+  .option("--non-interactive")
+  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
+    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
+      if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
+        const paths = resolveTargetPaths(globalOverrides());
+        const source = options.source ? sourceName(options.source) : undefined;
+        const provider = globalOverrides().providerInstance;
+        const instance = render(React.createElement(ImportTui, {
+          paths, mode: "sync",
+          ...(source ? { initialSource: source } : {}),
+          ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
+          ...(provider ? { initialProvider: provider } : {}),
+        }));
+        await instance.waitUntilExit();
+        return;
+      }
+      throw usageError("Non-interactive sync requires --source, --workspace, and either --thread or --all.");
+    }
+    if (options.all && options.thread.length) throw usageError("--all and --thread are mutually exclusive.");
+    if (!options.yes && (!process.stdout.isTTY || options.nonInteractive || isJson())) {
+      throw usageError("Non-interactive synchronization requires --yes.");
+    }
+    if (!options.dryRun && !options.yes) {
+      if (!await confirmSync(options.all ? 1 : options.thread.length)) return;
+    }
+    const source = sourceName(options.source);
+    const adapter = sourceAdapter(source);
+    const since = parseSince(options.since);
+    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}) });
+    const selected = options.all ? summaries : options.thread.map((id) => {
+      const summary = summaries.find((item) => item.id === id);
+      if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
+      return summary;
+    });
+    const paths = resolveTargetPaths(globalOverrides());
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace! }) })));
+    const eligible = options.all
+      ? (await Promise.all(loaded.map(async (selection) => ({ selection, preview: await inspectConversationSync(selection.conversation, paths) })))).filter((item) => item.preview.previouslyImported).map((item) => item.selection)
+      : loaded;
+    const result = await syncConversations(eligible, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
+    print(result);
+    if (result.hasConflicts) process.exitCode = 7;
+  });
+
 try {
   await program.parseAsync(process.argv);
 } catch (error) {
   if (isJson()) console.log(JSON.stringify({ schemaVersion: 1, status: "error", error: error instanceof Error ? error.message : String(error) }));
   else console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = error instanceof ImporterError ? error.exitCode : error instanceof z.ZodError ? 2 : 6;
+} finally {
+  await disposeSourceAdapters();
 }

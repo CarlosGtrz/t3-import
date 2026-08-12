@@ -13,6 +13,7 @@ import type {
   SourceAttachment,
   SourceSummary,
 } from "../core/types.js";
+import { isTerminalTurn } from "../core/types.js";
 import { readStableJsonl } from "../core/jsonl.js";
 import { canonicalPath, deriveTitle, isObject, isoTimestamp, stringValue, truncate, type JsonObject } from "../core/util.js";
 import { sourceError } from "../core/errors.js";
@@ -265,6 +266,34 @@ function buildThread(metadata: ClaudeMetadata, leaf: ClaudeNode, branchIndex: nu
   const appendActivity = (activity: CanonicalActivity) => {
     if (active) active.activities.push(activity);
   };
+  const applyControlNode = (node: ClaudeNode): void => {
+    if (!active) return;
+    const subtype = stringValue(node.row.subtype) ?? node.type;
+    if (subtype === "api_error") {
+      const detail = stringValue(node.row.error) ?? stringValue(node.row.message) ?? "Claude API request failed and was retried.";
+      active.activities.push({ sourceId: node.uuid, timestamp: node.timestamp, tone: "error", kind: "provider.error", summary: "Claude API retry", payload: { detail, historical: true, retrying: true } });
+      return;
+    }
+    if (subtype === "compact_boundary") {
+      active.activities.push({ sourceId: node.uuid, timestamp: node.timestamp, tone: "info", kind: "context-compaction", summary: "Context compacted", payload: { state: "compacted" } });
+      return;
+    }
+
+    const explicitStatus = stringValue(node.row.status);
+    const executionResult = node.type === "result" || subtype === "execution_result" || subtype === "result" || subtype === "local_command";
+    const failed = node.row.is_error === true || subtype.startsWith("error_") || Boolean(explicitStatus && ["error", "failed", "failure"].includes(explicitStatus));
+    if (executionResult && failed) {
+      const detail = stringValue(node.row.error) ?? stringValue(node.row.message) ?? stringValue(node.row.result) ?? "Claude execution failed.";
+      active.status = "failed";
+      active.terminalReason = subtype;
+      active.terminalError = detail;
+      active.completedAt = node.timestamp;
+      active.activities.push({ sourceId: `${node.uuid}:failed`, timestamp: node.timestamp, tone: "error", kind: "turn.failed", summary: "Turn failed", payload: { status: "failed", detail } });
+    } else if (executionResult && (subtype === "success" || explicitStatus === "success" || explicitStatus === "completed")) {
+      active.status = "completed";
+      active.completedAt = node.timestamp;
+    }
+  };
 
   for (const node of chain) {
     const content = messageContent(node.row);
@@ -277,7 +306,7 @@ function buildThread(metadata: ClaudeMetadata, leaf: ClaudeNode, branchIndex: nu
         active = {
           id: node.uuid,
           startedAt: node.timestamp,
-          complete: false,
+          status: "inProgress",
           user: { sourceId: node.uuid, role: "user", text: text || "[Image attachment]", timestamp: node.timestamp, attachments },
           assistant: [], activities: [], plans: [],
         };
@@ -347,11 +376,34 @@ function buildThread(metadata: ClaudeMetadata, leaf: ClaudeNode, branchIndex: nu
       }
       const stop = isObject(node.row.message) ? node.row.message.stop_reason : undefined;
       if (stop === "end_turn" || stop === "stop_sequence") {
-        active.complete = true;
+        active.status = "completed";
         active.completedAt = node.timestamp;
+      } else if (stop === "max_tokens") {
+        active.status = "interrupted";
+        active.terminalReason = "max_tokens";
+        active.completedAt = node.timestamp;
+        appendActivity({ sourceId: `${node.uuid}:max-tokens`, timestamp: node.timestamp, tone: "info", kind: "turn.interrupted", summary: "Turn truncated", payload: { status: "interrupted", detail: "Claude stopped after reaching the maximum token limit." } });
+      } else if (stop === "refusal") {
+        active.status = "completed";
+        active.terminalReason = "refusal";
+        active.completedAt = node.timestamp;
+        appendActivity({ sourceId: `${node.uuid}:refusal`, timestamp: node.timestamp, tone: "info", kind: "provider.refusal", summary: "Claude refused the request", payload: { historical: true } });
+      } else if (stop === "model_context_window_exceeded" || stop === "context_window_exceeded") {
+        active.status = "failed";
+        active.terminalReason = String(stop);
+        active.terminalError = "Claude exceeded the model context window.";
+        active.completedAt = node.timestamp;
+        appendActivity({ sourceId: `${node.uuid}:context-window-error`, timestamp: node.timestamp, tone: "error", kind: "turn.failed", summary: "Turn failed", payload: { status: "failed", detail: active.terminalError } });
       }
+    } else if ((node.type === "system" || node.type === "result") && active) {
+      applyControlNode(node);
     }
   }
+  const chainIds = new Set(chain.map((node) => node.uuid));
+  const trailingControlNodes = [...metadata.nodes.values()]
+    .filter((node) => !chainIds.has(node.uuid) && (node.type === "system" || node.type === "result") && isAncestor(metadata.nodes, leaf.uuid, node))
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  for (const node of trailingControlNodes) applyControlNode(node);
   if (active) turns.push(active);
   const currentBranch = leaf.uuid === metadata.currentLeaf.uuid;
   const branchSuffix = currentBranch || metadata.leaves.length === 1 ? "" : ` · historical ${branchIndex + 1}`;
@@ -404,11 +456,12 @@ export class ClaudeSource implements SourceAdapter {
       const metadata = analyze(snapshot.rows, fileStat.mtime.toISOString());
       const threads = metadata.leaves.map((leaf, index) => buildThread(metadata, leaf, index));
       if (!options.includeIncomplete) {
-        for (const thread of threads) thread.turns = thread.turns.filter((turn) => turn.complete);
+        for (const thread of threads) {
+          thread.ignoredInProgressTurns = thread.turns.filter((turn) => !isTerminalTurn(turn)).length;
+          thread.turns = thread.turns.filter(isTerminalTurn);
+        }
       }
-      const importable = threads.filter((thread) => thread.turns.length > 0);
-      if (!importable.length) throw sourceError(`No completed turns in Claude conversation ${summary.id}`);
-      return { summary: { ...summary, branches: importable.length }, threads: importable, fingerprint: snapshot.fingerprint };
+      return { summary: { ...summary, branches: metadata.leaves.length, status: threads.some((thread) => thread.ignoredInProgressTurns) ? "incomplete" : "complete" }, threads, fingerprint: snapshot.fingerprint };
     } catch (error) {
       if (error instanceof Error && error.name === "ImporterError") throw error;
       throw sourceError(`Unable to load Claude conversation ${summary.id}`, error);

@@ -16,6 +16,31 @@ afterEach(() => {
 });
 
 describe("migration-40 writer", () => {
+  it("writes completed, interrupted, failed, and included active snapshots as settled T3 sessions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-terminal-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
+    const paths = createMigration40Target(join(root, "t3"));
+    const thread = canonicalThread(workspace);
+    const fixture = thread.turns[0]!;
+    const { completedAt: _completedAt, ...activeFixture } = structuredClone(fixture);
+    thread.turns = [
+      fixture,
+      { ...structuredClone(fixture), id: "turn-interrupted", status: "interrupted", terminalReason: "budget_limited" },
+      { ...structuredClone(fixture), id: "turn-failed", status: "failed", terminalError: "provider exploded" },
+      { ...activeFixture, id: "turn-active", status: "inProgress" },
+    ];
+    const result = await importConversations([{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true });
+    expect(result.results[0]!.warnings).toContainEqual(expect.stringContaining("active provider snapshot"));
+    const db = new Database(paths.dbPath, { readonly: true });
+    const rows = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.session-set' ORDER BY sequence").all() as Array<{ payload: string }>;
+    const settled = rows.map((row) => JSON.parse(row.payload).session).filter((session) => session.activeTurnId === null);
+    expect(settled.map((session) => session.status)).toEqual(["ready", "interrupted", "error", "interrupted"]);
+    expect(settled[2]!.lastError).toBe("provider exploded");
+    db.close();
+  });
+
   it("backs up, appends canonical events, binds resume, and skips a re-import", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-target-"));
     const workspace = join(root, "workspace");
@@ -41,6 +66,10 @@ describe("migration-40 writer", () => {
     expect(second.backup).toBeNull();
     expect(eventCount(paths.dbPath)).toBe(inserted);
 
+    const caughtUp = new Database(paths.dbPath);
+    caughtUp.prepare("INSERT INTO projection_state (projector, last_applied_sequence) VALUES (?, ?)")
+      .run("projection.test", inserted);
+    caughtUp.close();
     const duplicate = await importConversations([{ ...selection, duplicate: true, resume: false }], paths, { dryRun: false, duplicate: true, resume: false });
     expect(duplicate.status).toBe("imported");
     expect(duplicate.results[0]!.resumable).toBe(false);
@@ -68,5 +97,67 @@ describe("migration-40 writer", () => {
     await expect(importConversations([{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }], paths, { dryRun: false, duplicate: false, resume: true }))
       .rejects.toMatchObject({ exitCode: 6 });
     expect(eventCount(paths.dbPath)).toBe(0);
+  });
+
+  it("compacts repetitive activity telemetry before planning events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-compact-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createMigration40Target(join(root, "t3"));
+    const thread = canonicalThread(workspace);
+    thread.turns[0]!.activities = [
+      ...Array.from({ length: 12 }, (_, index) => ({ sourceId: `usage-${index}`, tone: "info" as const, kind: "context-window.updated", summary: "Usage", timestamp: `2026-01-01T00:00:01.${String(index).padStart(3, "0")}Z`, payload: { usedTokens: index } })),
+      ...Array.from({ length: 8 }, (_, index) => ({ sourceId: `reasoning-${index}`, tone: "info" as const, kind: "reasoning.summary", summary: "Reasoning", timestamp: `2026-01-01T00:00:02.${String(index).padStart(3, "0")}Z`, payload: { detail: `step ${index}` } })),
+      ...Array.from({ length: 6 }, (_, index) => ({ sourceId: `tool-${index}`, tone: "tool" as const, kind: "tool.completed", summary: "Command", timestamp: `2026-01-01T00:00:03.${String(index).padStart(3, "0")}Z`, payload: { itemType: index === 5 ? "file_change" : "command_execution", status: "completed" } })),
+      { sourceId: "compaction", tone: "info", kind: "context-compaction", summary: "Compacted", timestamp: "2026-01-01T00:00:04.000Z", payload: { state: "compacted" } },
+    ];
+
+    const result = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }],
+      paths,
+      { dryRun: true, duplicate: false, resume: true },
+    );
+    expect(result.results[0]!.activities).toBe(3);
+    expect(result.results[0]!.warnings).toContainEqual(expect.stringContaining("Compacted 27 source activities to 3"));
+    expect(eventCount(paths.dbPath)).toBe(0);
+  });
+
+  it("rejects an import that cannot fit in one safe projection batch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-limit-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createMigration40Target(join(root, "t3"));
+    const thread = canonicalThread(workspace);
+    const fixtureTurn = thread.turns[0]!;
+    thread.turns = Array.from({ length: 160 }, (_, index) => ({
+      ...fixtureTurn,
+      id: `turn-${index}`,
+      user: { ...fixtureTurn.user, sourceId: `user-${index}` },
+      assistant: fixtureTurn.assistant.map((message) => ({ ...message, sourceId: `${message.sourceId}-${index}` })),
+      activities: fixtureTurn.activities.map((activity) => ({ ...activity, sourceId: `${activity.sourceId}-${index}` })),
+    }));
+
+    await expect(importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), duplicate: false, resume: true }],
+      paths,
+      { dryRun: true, duplicate: false, resume: true },
+    )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
+    expect(eventCount(paths.dbPath)).toBe(0);
+  });
+
+  it("rejects new writes while T3 projections are behind", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-backlog-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
+    const paths = createMigration40Target(join(root, "t3"));
+    const selection = { conversation: canonicalConversation(workspace), duplicate: false, resume: true };
+    await importConversations([selection], paths, { dryRun: false, duplicate: false, resume: true });
+
+    await expect(importConversations(
+      [{ ...selection, duplicate: true, resume: false }],
+      paths,
+      { dryRun: true, duplicate: true, resume: false },
+    )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("unprojected event") });
   });
 });

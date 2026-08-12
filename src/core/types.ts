@@ -1,5 +1,7 @@
 export type SourceName = "codex" | "claude";
 export type ActivityTone = "info" | "tool" | "approval" | "error";
+export type CanonicalTurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+export type CanonicalTerminalTurnStatus = Exclude<CanonicalTurnStatus, "inProgress">;
 
 export interface SourceSummary {
   source: SourceName;
@@ -51,7 +53,9 @@ export interface CanonicalTurn {
   id: string;
   startedAt: string;
   completedAt?: string;
-  complete: boolean;
+  status: CanonicalTurnStatus;
+  terminalReason?: string;
+  terminalError?: string;
   user: CanonicalMessage;
   assistant: CanonicalMessage[];
   activities: CanonicalActivity[];
@@ -72,6 +76,7 @@ export interface CanonicalThread {
   createdAt: string;
   updatedAt: string;
   turns: CanonicalTurn[];
+  ignoredInProgressTurns?: number;
   resumeCursor?: Record<string, unknown>;
   warnings: string[];
 }
@@ -92,6 +97,7 @@ export interface SourceAdapter {
   readonly name: SourceName;
   discover(options: DiscoveryOptions): Promise<SourceSummary[]>;
   load(summary: SourceSummary, options: DiscoveryOptions): Promise<CanonicalConversation>;
+  dispose?(): Promise<void>;
 }
 
 export interface TargetPaths {
@@ -120,6 +126,7 @@ export interface ImportItemResult {
   turns: number;
   messages: number;
   activities: number;
+  events: number;
   attachments: number;
   resumable: boolean;
   warnings: string[];
@@ -134,4 +141,68 @@ export interface ImportRunResult {
   backup: string | null;
   results: ImportItemResult[];
   warnings: string[];
+}
+
+export type SyncItemStatus =
+  | "synced"
+  | "up-to-date"
+  | "history-diverged"
+  | "branch-sync-unsupported"
+  | "target-missing"
+  | "not-imported"
+  | "dry-run";
+
+export type SyncTitleAction = "updated" | "unchanged" | "preserved-local";
+
+export interface SyncItemResult {
+  source: SourceName;
+  sourceId: string;
+  sourceKey: string;
+  status: SyncItemStatus;
+  threadId?: string;
+  projectId?: string;
+  title: string;
+  turnsAdded: number;
+  turnsAdopted: number;
+  events: number;
+  attachments: number;
+  titleAction: SyncTitleAction;
+  resumable: boolean;
+  warnings: string[];
+  sequence?: { first: number; last: number };
+}
+
+export interface SyncRunResult {
+  schemaVersion: 1;
+  status: "synced" | "up-to-date" | "dry-run" | "mixed" | "conflict";
+  target: string;
+  migration: number;
+  backup: string | null;
+  results: SyncItemResult[];
+  warnings: string[];
+  hasConflicts: boolean;
+}
+
+export interface SyncSelection {
+  conversation: CanonicalConversation;
+}
+
+export interface ConversationSyncPreview {
+  sourceId: string;
+  status: "new" | "active-only" | "syncable" | "up-to-date" | "history-diverged" | "branch-sync-unsupported" | "target-missing";
+  newTurns: number;
+  newCompletedTurns: number;
+  newInterruptedTurns: number;
+  newFailedTurns: number;
+  ignoredActiveTurns: number;
+  adoptedTurns: number;
+  titleChanged: boolean;
+  selectable: boolean;
+  previouslyImported: boolean;
+  threadId?: string;
+  warnings: string[];
+}
+
+export function isTerminalTurn(turn: CanonicalTurn): boolean {
+  return turn.status !== "inProgress";
 }
