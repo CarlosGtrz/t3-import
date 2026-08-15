@@ -84,6 +84,69 @@ describe("canonical task replacement", () => {
     ledger.close();
   });
 
+  it("consolidates every imported fragment of a normalized Claude session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-replace-claude-consolidate-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
+    const paths = createMigration40Target(join(root, "t3"));
+    const sessionId = "88888888-8888-4888-8888-888888888888";
+    const makeThread = (leaf: string, currentBranch: boolean) => {
+      const thread = structuredClone(canonicalThread(workspace));
+      thread.source = "claude";
+      thread.sourceSessionId = sessionId;
+      thread.sourceKey = `claude:${sessionId}:${leaf}`;
+      thread.leafId = leaf;
+      thread.currentBranch = currentBranch;
+      thread.title = currentBranch ? "Fragmented conversation" : `Fragmented conversation · ${leaf}`;
+      thread.warnings = currentBranch ? [] : ["Historical Claude branch"];
+      if (currentBranch) thread.resumeCursor = { resume: sessionId, resumeSessionAt: leaf, turnCount: 1 };
+      else delete thread.resumeCursor;
+      return thread;
+    };
+    const fragments = [makeThread("leaf-1", false), makeThread("leaf-2", false), makeThread("leaf-3", true)];
+    const fragmented = canonicalConversation(workspace, fragments[2]);
+    fragmented.summary = { ...fragmented.summary, source: "claude", id: sessionId, title: "Fragmented conversation", branches: 3 };
+    fragmented.threads = fragments;
+    const imported = await importConversations([{ conversation: fragmented, resume: true }], paths, { dryRun: false, resume: true });
+    caughtUp(paths);
+    const oldThreadIds = imported.results.map((result) => result.threadId);
+    const currentOldThreadId = imported.results.find((result) => result.resumable)!.threadId;
+
+    const normalizedThread = makeThread("leaf-3", true);
+    normalizedThread.title = "Fragmented conversation";
+    normalizedThread.turns.push(nextTurn());
+    const normalized = canonicalConversation(workspace, normalizedThread);
+    normalized.summary = { ...normalized.summary, source: "claude", id: sessionId, title: normalizedThread.title, branches: 1 };
+    normalized.fingerprint = "normalized-claude-fingerprint";
+    const expectedNew = replacementThreadId(normalizedThread.sourceKey, currentOldThreadId);
+
+    const preview = await inspectConversationReplacement(normalized, paths);
+    expect(preview).toMatchObject({ status: "replaceable", oldThreadId: currentOldThreadId, newThreadId: expectedNew });
+    expect(new Set(preview.oldThreadIds)).toEqual(new Set(oldThreadIds));
+    const result = await replaceConversations([{ conversation: normalized }], paths, { dryRun: false });
+    expect(result.results[0]).toMatchObject({ status: "replaced", oldThreadId: currentOldThreadId, newThreadId: expectedNew, resumeTransferred: true });
+    expect(new Set(result.results[0]!.oldThreadIds)).toEqual(new Set(oldThreadIds));
+
+    const db = new Database(paths.dbPath, { readonly: true });
+    const deleted = db.prepare("SELECT stream_id threadId FROM orchestration_events WHERE event_type='thread.deleted'").all() as Array<{ threadId: string }>;
+    expect(new Set(deleted.map((row) => row.threadId))).toEqual(new Set(oldThreadIds));
+    const created = db.prepare("SELECT metadata_json metadata FROM orchestration_events WHERE stream_id=? AND event_type='thread.created'").get(expectedNew) as { metadata: string };
+    expect(new Set(JSON.parse(created.metadata).t3Import.replacesThreadIds)).toEqual(new Set(oldThreadIds));
+    const runtimes = db.prepare("SELECT thread_id threadId FROM provider_session_runtime").all() as Array<{ threadId: string }>;
+    expect(runtimes).toEqual([{ threadId: expectedNew }]);
+    db.close();
+
+    const ledger = new Database(join(root, "ledger", "ledger.sqlite"), { readonly: true });
+    const records = ledger.prepare("SELECT thread_id threadId, is_canonical canonical, superseded_by_thread_id supersededBy FROM imports").all() as Array<{ threadId: string; canonical: number; supersededBy: string | null }>;
+    expect(records.filter((record) => oldThreadIds.includes(record.threadId))).toHaveLength(3);
+    expect(records.filter((record) => oldThreadIds.includes(record.threadId))).toEqual(expect.arrayContaining(
+      oldThreadIds.map((threadId) => ({ threadId, canonical: 0, supersededBy: expectedNew })),
+    ));
+    expect(records).toContainEqual({ threadId: expectedNew, canonical: 1, supersededBy: null });
+    ledger.close();
+  });
+
   it("is a no-op when the canonical replacement already contains the complete source", async () => {
     const { paths, conversation } = await fixture("t3-replace-repeat-");
     await replaceConversations([{ conversation }], paths, { dryRun: false });

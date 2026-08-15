@@ -113,6 +113,7 @@ function claudeUsageActivity(row: JsonObject, nodeId: string, timestamp: string)
 
 function isConversationEndpoint(node: ClaudeNode): boolean {
   if (node.sidechain || (node.type !== "user" && node.type !== "assistant")) return false;
+  if (node.type === "user" && node.row.isCompactSummary === true) return false;
   const content = messageContent(node.row);
   if (textFromContent(content)) return true;
   return node.type === "user" && attachmentsFromContent(content, node.uuid).length > 0;
@@ -143,9 +144,98 @@ function isAncestor(nodes: Map<string, ClaudeNode>, ancestorId: string, node: Cl
   return false;
 }
 
+function childIndex(nodes: Map<string, ClaudeNode>): Map<string, ClaudeNode[]> {
+  const children = new Map<string, ClaudeNode[]>();
+  for (const node of nodes.values()) {
+    if (!node.parentUuid || node.sidechain) continue;
+    const siblings = children.get(node.parentUuid) ?? [];
+    siblings.push(node);
+    children.set(node.parentUuid, siblings);
+  }
+  return children;
+}
+
+function reconnectCompactBoundaries(nodes: Map<string, ClaudeNode>): void {
+  for (const node of nodes.values()) {
+    if (node.sidechain || node.type !== "system" || node.row.subtype !== "compact_boundary" || node.parentUuid) continue;
+    const logicalParentUuid = stringValue(node.row.logicalParentUuid);
+    const logicalParent = logicalParentUuid ? nodes.get(logicalParentUuid) : undefined;
+    if (!logicalParent || logicalParent.sidechain || logicalParent.timestamp > node.timestamp) continue;
+    // A compact boundary is emitted as a new physical root, but Claude records
+    // the exact prior graph node in logicalParentUuid. Honor it only when the
+    // target is local, older, and cannot introduce a cycle.
+    if (isAncestor(nodes, node.uuid, logicalParent)) continue;
+    node.parentUuid = logicalParent.uuid;
+  }
+}
+
+function subtree(root: ClaudeNode, children: Map<string, ClaudeNode[]>): ClaudeNode[] {
+  const output: ClaudeNode[] = [];
+  const pending = [root];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (visited.has(node.uuid)) continue;
+    visited.add(node.uuid);
+    output.push(node);
+    pending.push(...(children.get(node.uuid) ?? []));
+  }
+  return output;
+}
+
+function completedRetryEndpoint(
+  nodes: Map<string, ClaudeNode>,
+  root: ClaudeNode,
+  children: Map<string, ClaudeNode[]>,
+): ClaudeNode | undefined {
+  const branch = subtree(root, children);
+  const branchIds = new Set(branch.map((node) => node.uuid));
+  if (branch.some((node) => node.type === "user" && isConversationEndpoint(node))) return undefined;
+  const physicalLeaves = branch.filter((node) => !(children.get(node.uuid) ?? []).some((child) => branchIds.has(child.uuid)));
+  const endpoints = new Map<string, ClaudeNode>();
+  for (const physicalLeaf of physicalLeaves) {
+    const endpoint = nearestConversationEndpoint(nodes, physicalLeaf);
+    if (endpoint && branchIds.has(endpoint.uuid)) endpoints.set(endpoint.uuid, endpoint);
+  }
+  if (endpoints.size !== 1) return undefined;
+  const endpoint = [...endpoints.values()][0]!;
+  if (endpoint.type !== "assistant" || !isObject(endpoint.row.message)) return undefined;
+  const stop = endpoint.row.message.stop_reason;
+  return stop === "end_turn" || stop === "stop_sequence" || stop === "refusal" || stop === "max_tokens"
+    ? endpoint
+    : undefined;
+}
+
+function reconnectSuccessfulRetries(nodes: Map<string, ClaudeNode>): void {
+  for (const retry of nodes.values()) {
+    if (retry.sidechain || retry.type !== "system" || retry.row.subtype !== "api_error" || !retry.parentUuid) continue;
+    const attempt = nonNegativeInt(retry.row.retryAttempt);
+    const maximum = nonNegativeInt(retry.row.maxRetries);
+    if (attempt === undefined || maximum === undefined || attempt >= maximum) continue;
+    const children = childIndex(nodes);
+    const siblings = (children.get(retry.parentUuid) ?? []).filter(
+      (node) => node.uuid !== retry.uuid && node.type === "assistant" && node.timestamp >= retry.timestamp,
+    );
+    const candidates = siblings.flatMap((root) => {
+      const endpoint = completedRetryEndpoint(nodes, root, children);
+      return endpoint ? [{ root, endpoint }] : [];
+    });
+    if (candidates.length !== 1) continue;
+    const continuation = children.get(retry.uuid) ?? [];
+    const { root, endpoint } = candidates[0]!;
+    if (continuation.length > 1 || continuation.some((node) => node.timestamp < endpoint.timestamp)) continue;
+
+    // Claude can attach the successful retry response beside api_error while
+    // attaching the next prompt to the error/control path. The timestamps and
+    // lack of a real user prompt in the response branch make this shape
+    // unambiguous: error -> successful response -> later continuation.
+    root.parentUuid = retry.uuid;
+    if (continuation[0]) continuation[0].parentUuid = endpoint.uuid;
+  }
+}
+
 function analyze(rows: unknown[], fallbackTime: string): ClaudeMetadata {
   const nodes = new Map<string, ClaudeNode>();
-  const referenced = new Set<string>();
   let sessionId: string | undefined;
   let workspace: string | undefined;
   let title: string | undefined;
@@ -172,7 +262,6 @@ function analyze(rows: unknown[], fallbackTime: string): ClaudeMetadata {
     if (!uuid || typeof type !== "string") continue;
     const timestamp = isoTimestamp(raw.timestamp, fallbackTime);
     const parentUuid = stringValue(raw.parentUuid);
-    if (parentUuid) referenced.add(parentUuid);
     nodes.set(uuid, {
       uuid,
       ...(parentUuid ? { parentUuid } : {}),
@@ -187,7 +276,10 @@ function analyze(rows: unknown[], fallbackTime: string): ClaudeMetadata {
   }
   if (!sessionId) throw sourceError("Claude transcript has no sessionId");
   if (!workspace) throw sourceError(`Claude transcript ${sessionId} has no cwd`);
+  reconnectCompactBoundaries(nodes);
+  reconnectSuccessfulRetries(nodes);
   const mainNodes = [...nodes.values()].filter((node) => !node.sidechain);
+  const referenced = new Set(mainNodes.flatMap((node) => node.parentUuid ? [node.parentUuid] : []));
   const physicalLeaves = mainNodes.filter((node) => !referenced.has(node.uuid));
   const endpointById = new Map<string, ClaudeNode>();
   for (const leaf of physicalLeaves) {
@@ -299,6 +391,7 @@ function buildThread(metadata: ClaudeMetadata, leaf: ClaudeNode, branchIndex: nu
     const content = messageContent(node.row);
     const blocks = readBlocks(content);
     if (node.type === "user") {
+      if (node.row.isCompactSummary === true) continue;
       const text = textFromContent(content);
       const attachments = attachmentsFromContent(content, node.uuid);
       if (text || attachments.length > 0) {

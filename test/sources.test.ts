@@ -179,6 +179,46 @@ describe("source adapters", () => {
     expect(historical.warnings[0]).toContain("Historical Claude branch");
   });
 
+  it("relinks a successful API retry and an automatic compaction into one Claude thread", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-claude-relinked-"));
+    const workspace = join(root, "workspace");
+    const project = join(root, "projects", "fixture");
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = root;
+    const sessionId = "77777777-7777-4777-8777-777777777777";
+    const base = { sessionId, cwd: workspace, isSidechain: false };
+    jsonl(join(project, `${sessionId}.jsonl`), [
+      { ...base, uuid: "u1", parentUuid: null, type: "user", timestamp: "2026-01-01T00:00:00Z", message: { content: "Build it" } },
+      { ...base, uuid: "a1", parentUuid: "u1", type: "assistant", timestamp: "2026-01-01T00:00:01Z", message: { content: [{ type: "tool_use", id: "call-1", name: "Bash", input: { command: "test" } }], stop_reason: "tool_use" } },
+      { ...base, uuid: "r1", parentUuid: "a1", type: "user", timestamp: "2026-01-01T00:00:02Z", message: { content: [{ type: "tool_result", tool_use_id: "call-1", content: "ok" }] } },
+      { ...base, uuid: "retry", parentUuid: "r1", type: "system", subtype: "api_error", timestamp: "2026-01-01T00:00:03Z", retryAttempt: 1, maxRetries: 10, error: "connection reset" },
+      { ...base, uuid: "recovered", parentUuid: "r1", type: "assistant", timestamp: "2026-01-01T00:00:04Z", message: { content: [{ type: "text", text: "Recovered" }], stop_reason: "end_turn" } },
+      { ...base, uuid: "hook", parentUuid: "retry", type: "system", subtype: "stop_hook_summary", timestamp: "2026-01-01T00:00:05Z" },
+      { ...base, uuid: "u2", parentUuid: "hook", type: "user", timestamp: "2026-01-01T00:00:06Z", message: { content: "Continue" } },
+      { ...base, uuid: "a2", parentUuid: "u2", type: "assistant", timestamp: "2026-01-01T00:00:07Z", message: { content: [{ type: "text", text: "Before compaction" }], stop_reason: "tool_use" } },
+      { ...base, uuid: "compact", parentUuid: null, logicalParentUuid: "a2", type: "system", subtype: "compact_boundary", timestamp: "2026-01-01T00:00:08Z", compactMetadata: { trigger: "auto" } },
+      { ...base, uuid: "summary", parentUuid: "compact", type: "user", timestamp: "2026-01-01T00:00:08.100Z", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { content: "This session is being continued from a previous conversation" } },
+      { ...base, uuid: "a3", parentUuid: "summary", type: "assistant", timestamp: "2026-01-01T00:00:09Z", message: { content: [{ type: "text", text: "Finished continuation" }], stop_reason: "end_turn" } },
+      { ...base, uuid: "u3", parentUuid: "a3", type: "user", timestamp: "2026-01-01T00:00:10Z", message: { content: "Next" } },
+      { ...base, uuid: "a4", parentUuid: "u3", type: "assistant", timestamp: "2026-01-01T00:00:11Z", message: { content: [{ type: "text", text: "Done" }], stop_reason: "end_turn" } },
+      { ...base, type: "last-prompt", leafUuid: "u3", lastPrompt: "Next" },
+    ]);
+
+    const adapter = new ClaudeSource();
+    const summary = (await adapter.discover({ workspace }))[0]!;
+    expect(summary.branches).toBe(1);
+    const conversation = await adapter.load(summary, {});
+    expect(conversation.threads).toHaveLength(1);
+    const thread = conversation.threads[0]!;
+    expect(thread.turns.map((turn) => turn.user.text)).toEqual(["Build it", "Continue", "Next"]);
+    expect(thread.turns[0]!.assistant.map((message) => message.text)).toContain("Recovered");
+    expect(thread.turns[0]!.activities).toContainEqual(expect.objectContaining({ kind: "provider.error" }));
+    expect(thread.turns[1]!.assistant.map((message) => message.text)).toEqual(["Before compaction", "Finished continuation"]);
+    expect(thread.turns[1]!.activities).toContainEqual(expect.objectContaining({ kind: "context-compaction" }));
+    expect(thread.resumeCursor).toMatchObject({ resume: sessionId, resumeSessionAt: "a4", turnCount: 3 });
+  });
+
   it("parses a Codex rollout without app-server data", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-codex-"));
     const workspace = join(root, "workspace");

@@ -218,6 +218,7 @@ export interface ReplaceItemResult {
   events: number;
   attachments: number;
   resumeTransferred: boolean;
+  oldThreadIds?: string[];
   warnings: string[];
   sequence?: { first: number; last: number };
 }
@@ -243,6 +244,7 @@ export interface ConversationReplacePreview {
   events: number;
   attachments: number;
   oldThreadId?: string;
+  oldThreadIds?: string[];
   newThreadId?: string;
   warnings: string[];
 }

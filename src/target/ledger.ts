@@ -167,14 +167,21 @@ function decodeRow(row: RawLedgerRow): StoredLedgerRecord {
 }
 
 export function recordReplacement(oldRecord: StoredLedgerRecord, newRecord: LedgerRecord): void {
+  recordConsolidation([oldRecord], newRecord);
+}
+
+export function recordConsolidation(oldRecords: StoredLedgerRecord[], newRecord: LedgerRecord): void {
   const db = openLedger();
   try {
     const replacedAt = newRecord.replacedAt ?? new Date().toISOString();
     db.transaction(() => {
-      db.prepare(`
+      const supersede = db.prepare(`
         UPDATE imports SET is_canonical = 0, superseded_by_thread_id = ?, replaced_at = ?
         WHERE target_id = ? AND thread_id = ?
-      `).run(newRecord.threadId, replacedAt, oldRecord.targetId, oldRecord.threadId);
+      `);
+      for (const oldRecord of oldRecords) {
+        supersede.run(newRecord.threadId, replacedAt, oldRecord.targetId, oldRecord.threadId);
+      }
       const insert = db.prepare(`
         INSERT OR REPLACE INTO imports (
           target_id, source, source_session_id, source_key, source_fingerprint,
