@@ -142,6 +142,36 @@ describe("source adapters", () => {
     expect(thread.ignoredInProgressTurns).toBe(1);
   });
 
+  it("settles historical Claude turns without terminal markers when a later user turn exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-claude-historical-interruption-"));
+    const workspace = join(root, "workspace");
+    const project = join(root, "projects", "fixture");
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = root;
+    const sessionId = "99999999-9999-4999-8999-999999999999";
+    const base = { sessionId, cwd: workspace, isSidechain: false };
+    jsonl(join(project, `${sessionId}.jsonl`), [
+      { ...base, uuid: "u1", parentUuid: null, type: "user", timestamp: "2026-01-01T00:00:00Z", message: { content: "Start" } },
+      { ...base, uuid: "a1", parentUuid: "u1", type: "assistant", timestamp: "2026-01-01T00:00:01Z", message: { content: [{ type: "text", text: "Still working" }], stop_reason: "tool_use" } },
+      { ...base, uuid: "u2", parentUuid: "a1", type: "user", timestamp: "2026-01-01T00:00:02Z", message: { content: "Continue" } },
+      { ...base, uuid: "a2", parentUuid: "u2", type: "assistant", timestamp: "2026-01-01T00:00:03Z", message: { content: [{ type: "text", text: "Done" }], stop_reason: "end_turn" } },
+      { ...base, uuid: "u3", parentUuid: "a2", type: "user", timestamp: "2026-01-01T00:00:04Z", message: { content: "Trailing" } },
+      { ...base, uuid: "a3", parentUuid: "u3", type: "assistant", timestamp: "2026-01-01T00:00:05Z", message: { content: [{ type: "text", text: "Active" }], stop_reason: "tool_use" } },
+      { ...base, type: "last-prompt", leafUuid: "u3", lastPrompt: "Trailing" },
+    ]);
+
+    const adapter = new ClaudeSource();
+    const summary = (await adapter.discover({ workspace }))[0]!;
+    const conversation = await adapter.load(summary, {});
+    expect(conversation.threads[0]!.turns.map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+    expect(conversation.threads[0]!.turns[0]).toMatchObject({ terminalReason: "next_user_message", completedAt: "2026-01-01T00:00:02.000Z" });
+    expect(conversation.threads[0]!.turns[0]!.activities).toContainEqual(expect.objectContaining({ kind: "turn.interrupted" }));
+    expect(conversation.threads[0]!.ignoredInProgressTurns).toBe(1);
+    const withActive = await adapter.load(summary, { includeIncomplete: true });
+    expect(withActive.threads[0]!.turns.map((turn) => turn.status)).toEqual(["interrupted", "completed", "inProgress"]);
+  });
+
   it("keeps Claude's originating workspace, separates real branches, and ignores parallel tool-result leaves", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-claude-"));
     const workspace = join(root, "workspace");

@@ -395,7 +395,25 @@ function buildThread(metadata: ClaudeMetadata, leaf: ClaudeNode, branchIndex: nu
       const text = textFromContent(content);
       const attachments = attachmentsFromContent(content, node.uuid);
       if (text || attachments.length > 0) {
-        if (active) turns.push(active);
+        if (active) {
+          if (active.status === "inProgress") {
+            active.status = "interrupted";
+            active.terminalReason = "next_user_message";
+            active.completedAt = node.timestamp;
+            active.activities.push({
+              sourceId: `${node.uuid}:previous-turn-interrupted`,
+              timestamp: node.timestamp,
+              tone: "info",
+              kind: "turn.interrupted",
+              summary: "Turn interrupted",
+              payload: {
+                status: "interrupted",
+                detail: "A later user message proves this historical Claude turn was no longer active.",
+              },
+            });
+          }
+          turns.push(active);
+        }
         active = {
           id: node.uuid,
           startedAt: node.timestamp,
