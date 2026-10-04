@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { TargetPaths } from "../core/types.js";
 import { compatibilityError, safetyError } from "../core/errors.js";
 import { isObject, stringValue } from "../core/util.js";
@@ -72,6 +73,9 @@ export interface SchemaInfo {
 }
 
 export function validateTargetDatabase(db: Database.Database): SchemaInfo {
+  if (basename(db.name) === "state.sqlite" && existsSync(join(dirname(db.name), "statev2.sqlite"))) {
+    throw compatibilityError("This T3 home uses statev2.sqlite. Import into a separate V1 staging home, then use upgrade-v2; writing its retired state.sqlite would not update native V2 history.");
+  }
   const integrity = String(db.pragma("integrity_check", { simple: true }) ?? "unknown");
   if (integrity !== "ok") throw compatibilityError(`T3 database integrity check failed: ${integrity}`);
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;

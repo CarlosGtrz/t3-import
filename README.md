@@ -99,10 +99,25 @@ When `--json` is active, stdout contains one versioned JSON value and diagnostic
 
 ## Safety and storage
 
+### Nightly V2 history migration
+
+T3 `v0.0.46-nightly.20261003.2638` introduces `userdata/statev2.sqlite` at database migration 56. Its initial legacy importer retains messages and images but omits old activities, plans, and provider resume identities. After T3 has initialized its new database, close the app and run the explicit bridge:
+
+```text
+t3-import --t3-home /path/to/copied-t3-home upgrade-v2 --dry-run
+t3-import --t3-home /path/to/copied-t3-home upgrade-v2 --yes
+```
+
+The source defaults to the adjacent `userdata/state.sqlite`; `--legacy-db` selects another read-only V1 snapshot and repeatable `--thread` limits the selection. `--db` selects the V2 target. Work on a backed-up copy first. Keep the source's adjacent attachment folder available.
+
+The bridge preserves full activity payloads, failed tools, plans, message attachments, and supported Codex/Claude native session identities. Historical runs are marked completed, failed, or interrupted; it does not restart executions, create schedules, or contact a provider. For a saved native identity, it records that the existing provider conversation already owns the imported history, including failed and interrupted inputs. This prevents T3 from redelivering those historical prompts as missed inputs while preserving their original statuses; no native execution attempts are fabricated. A binding alone does not verify live continuation. It backs up the target, atomically appends native V2 events and their persisted projections, verifies image bytes, and skips unchanged snapshots. Changed V1 snapshots are rejected once a chat has native V2 runs. Migration 56 is the only supported V2 schema; other future versions fail closed.
+
+Ordinary V1 import/sync commands reject a retired `state.sqlite` beside `statev2.sqlite`. They must operate in a separate V1 staging home before the explicit bridge. Do not write new imports into the nightly's inactive legacy database.
+
 - Close T3 before every real import. There is deliberately no force bypass.
 - Every write creates and verifies a timestamped SQLite backup under `<state-dir>/t3-import-backups/`.
 - Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
-- The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
+- V1 commands append `orchestration_events` and write resumable rows to `provider_session_runtime`, without writing projections. The explicit V2 bridge commits events and V2 projections together because this nightly does not replay offline events at startup.
 - Imports are idempotent. A second import reports `already-imported`. `sync` only appends completed, interrupted, or failed turns after an unchanged checkpoint, and repeated syncs are no-ops. `replace` promotes one complete new task as the sole synchronization target and soft-deletes the old canonical task; repeating it against that unchanged replacement is also a no-op.
 - New imports are rejected when T3 has an existing projection backlog or when the compact event plan exceeds the safe 900-event startup budget.
 - Supported local image attachments are copied atomically. Remote images are referenced but not downloaded.

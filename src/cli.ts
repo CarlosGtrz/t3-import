@@ -17,6 +17,8 @@ import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
 import { replaceConversations } from "./target/replace.js";
 import { discoverT3CacheProfiles, formatCacheResetResult, resetT3RebuildableCache } from "./target/cache.js";
+import { upgradeLegacyToV2 } from "./target/upgradeV2.js";
+import { join } from "node:path";
 
 const sourceSchema = z.enum(["codex", "claude"]);
 const program = new Command();
@@ -81,7 +83,7 @@ program
   .description("Import, synchronize, and replace Codex and Claude Code conversations in T3 Code")
   .version(IMPORTER_VERSION)
   .option("--t3-home <path>", "T3 home directory")
-  .option("--db <path>", "T3 state.sqlite path")
+  .option("--db <path>", "T3 SQLite target database path")
   .option("--attachments-dir <path>", "T3 attachments directory")
   .option("--provider-instance <id>", "T3 provider instance")
   .option("--json", "write machine-readable JSON to stdout")
@@ -120,6 +122,20 @@ program.command("show")
     if (!summary) throw usageError(`Conversation not found: ${options.thread}`);
     const conversation = await adapter.load(summary, { ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
     print({ schemaVersion: 1, source: conversation.summary, fingerprint: conversation.fingerprint, tasks: conversation.threads.map((thread) => ({ sourceKey: thread.sourceKey, title: thread.title, currentBranch: thread.currentBranch, resumable: Boolean(thread.resumeCursor), turns: thread.turns.length, messages: thread.turns.reduce((sum, turn) => sum + 1 + turn.assistant.length, 0), activities: thread.turns.reduce((sum, turn) => sum + turn.activities.length, 0), plans: thread.turns.reduce((sum, turn) => sum + turn.plans.length, 0), attachments: thread.turns.reduce((sum, turn) => sum + turn.user.attachments.length, 0), warnings: thread.warnings })) });
+  });
+
+program.command("upgrade-v2")
+  .description("Restore legacy activity, plans, images and resume identities in native T3 V2")
+  .option("--legacy-db <path>", "read-only V1 snapshot (defaults to userdata/state.sqlite)")
+  .option("--thread <id>", "upgrade only this legacy thread", collect, [])
+  .option("--dry-run", "preview without writes")
+  .option("--yes", "apply the backed-up offline upgrade")
+  .action(async (options: { legacyDb?: string; thread: string[]; dryRun?: boolean; yes?: boolean }) => {
+    if (!options.dryRun && !options.yes) throw usageError("Writing a V2 bridge requires --yes. Preview first with --dry-run.");
+    const overrides = globalOverrides();
+    const defaultPaths = resolveTargetPaths(overrides);
+    const paths = resolveTargetPaths({ ...overrides, dbPath: overrides.dbPath ?? join(defaultPaths.stateDir, "statev2.sqlite") });
+    print(await upgradeLegacyToV2(paths, { dryRun: Boolean(options.dryRun), ...(options.legacyDb ? { legacyDbPath: options.legacyDb } : {}), ...(options.thread.length ? { threadIds: options.thread } : {}) }));
   });
 
 program.command("doctor")
