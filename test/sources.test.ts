@@ -354,7 +354,7 @@ for await (const line of lines) {
     await adapter.dispose();
     const calls = readFileSync(log, "utf8").trim().split(/\r?\n/u);
     expect(calls.filter((call) => call === "spawn")).toHaveLength(1);
-    expect(calls.filter((call) => call === "thread/list")).toHaveLength(1);
+    expect(calls.filter((call) => call === "thread/list")).toHaveLength(2);
     expect(calls.filter((call) => call === "thread/read")).toHaveLength(2);
   });
 });

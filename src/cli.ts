@@ -26,6 +26,7 @@ function globalOverrides(): TargetOverrides {
   const values = program.opts<{ t3Home?: string; db?: string; attachmentsDir?: string; providerInstance?: string }>();
   return { ...(values.t3Home ? { t3Home: values.t3Home } : {}), ...(values.db ? { dbPath: values.db } : {}), ...(values.attachmentsDir ? { attachmentsDir: values.attachmentsDir } : {}), ...(values.providerInstance ? { providerInstance: values.providerInstance } : {}) };
 }
+function includeSubagents(): boolean { return Boolean(program.opts<{ includeSubagents?: boolean }>().includeSubagents); }
 function isJson(): boolean { return Boolean(program.opts<{ json?: boolean }>().json); }
 function shouldResetCache(): boolean { return program.opts<{ cacheReset?: boolean }>().cacheReset !== false; }
 function print(value: unknown): void { console.log(isJson() ? JSON.stringify(value) : typeof value === "string" ? value : JSON.stringify(value, null, 2)); }
@@ -84,13 +85,14 @@ program
   .option("--db <path>", "T3 state.sqlite path")
   .option("--attachments-dir <path>", "T3 attachments directory")
   .option("--provider-instance <id>", "T3 provider instance")
+  .option("--include-subagents", "include Codex child-agent conversations as separate tasks")
   .option("--json", "write machine-readable JSON to stdout")
   .option("--no-color", "disable color output")
   .option("--no-cache-reset", "keep T3's existing IndexedDB cache after writes")
   .action(async () => {
     const paths = resolveTargetPaths(globalOverrides());
     const provider = globalOverrides().providerInstance;
-    const instance = render(React.createElement(ImportTui, { paths, resetCache: shouldResetCache(), ...(provider ? { initialProvider: provider } : {}) }));
+    const instance = render(React.createElement(ImportTui, { includeSubagents: includeSubagents(), paths, resetCache: shouldResetCache(), ...(provider ? { initialProvider: provider } : {}) }));
     await instance.waitUntilExit();
   });
 
@@ -101,7 +103,7 @@ program.command("list")
   .option("--since <date>", "ISO date/time")
   .action(async (options: { source: string; workspace?: string; since?: string }) => {
     const since = parseSince(options.since);
-    const summaries = await sourceAdapter(sourceName(options.source)).discover({ ...(options.workspace ? { workspace: options.workspace } : {}), ...(since ? { since } : {}) });
+    const summaries = await sourceAdapter(sourceName(options.source)).discover({ includeSubagents: includeSubagents(), ...(options.workspace ? { workspace: options.workspace } : {}), ...(since ? { since } : {}) });
     if (isJson()) print({ schemaVersion: 1, conversations: summaries });
     else if (!summaries.length) print("No conversations found.");
     else print(summaries.map((item) => `${item.id}\t${item.updatedAt}\t${item.branches}\t${item.workspace}\t${item.title}`).join("\n"));
@@ -115,7 +117,7 @@ program.command("show")
   .option("--include-incomplete")
   .action(async (options: { source: string; thread: string; workspace?: string; includeIncomplete?: boolean }) => {
     const adapter = sourceAdapter(sourceName(options.source));
-    const summaries = await adapter.discover(options.workspace ? { workspace: options.workspace } : {});
+    const summaries = await adapter.discover({ includeSubagents: includeSubagents(), ...(options.workspace ? { workspace: options.workspace } : {}) });
     const summary = summaries.find((item) => item.id === options.thread);
     if (!summary) throw usageError(`Conversation not found: ${options.thread}`);
     const conversation = await adapter.load(summary, { ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
@@ -137,7 +139,7 @@ program.command("doctor")
     const staging = existsSync(paths.attachmentsDir) ? readdirSync(paths.attachmentsDir).filter((name) => name.startsWith(".t3-import-staging-")) : [];
     const sources: Record<string, unknown> = {};
     for (const name of ["codex", "claude"] as const) {
-      try { const items = await sourceAdapter(name).discover({}); sources[name] = { available: true, conversations: items.length, workspaces: new Set(items.map((item) => item.workspace)).size }; }
+      try { const items = await sourceAdapter(name).discover({ includeSubagents: includeSubagents(),}); sources[name] = { available: true, conversations: items.length, workspaces: new Set(items.map((item) => item.workspace)).size }; }
       catch (error) { sources[name] = { available: false, error: error instanceof Error ? error.message : String(error) }; }
     }
     print({ schemaVersion: 1, target: paths, runtime, database, sources, indexedDbCaches: discoverT3CacheProfiles(), stagingDirectories: staging });
@@ -174,7 +176,7 @@ program.command("import")
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
         const provider = globalOverrides().providerInstance;
-        const instance = render(React.createElement(ImportTui, {
+        const instance = render(React.createElement(ImportTui, { includeSubagents: includeSubagents(),
           paths,
           ...(source ? { initialSource: source } : {}),
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
@@ -194,7 +196,7 @@ program.command("import")
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
+    const summaries = await adapter.discover({ includeSubagents: includeSubagents(), workspace: options.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
     const selected: SourceSummary[] = options.all ? summaries : options.thread.map((id) => {
       const summary = summaries.find((item) => item.id === id);
       if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
@@ -220,7 +222,7 @@ program.command("replace")
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
-        const instance = render(React.createElement(ImportTui, {
+        const instance = render(React.createElement(ImportTui, { includeSubagents: includeSubagents(),
           paths, mode: "replace",
           ...(source ? { initialSource: source } : {}),
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
@@ -235,7 +237,7 @@ program.command("replace")
     if (!options.dryRun && !options.yes && !await confirmReplace(options.thread.length)) return;
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
-    const summaries = await adapter.discover({ workspace: options.workspace });
+    const summaries = await adapter.discover({ includeSubagents: includeSubagents(), workspace: options.workspace });
     const selected = [...new Set(options.thread)].map((id) => {
       const summary = summaries.find((item) => item.id === id);
       if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
@@ -265,7 +267,7 @@ program.command("sync")
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
         const provider = globalOverrides().providerInstance;
-        const instance = render(React.createElement(ImportTui, {
+        const instance = render(React.createElement(ImportTui, { includeSubagents: includeSubagents(),
           paths, mode: "sync",
           ...(source ? { initialSource: source } : {}),
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
@@ -287,7 +289,7 @@ program.command("sync")
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}) });
+    const summaries = await adapter.discover({ includeSubagents: includeSubagents(), workspace: options.workspace, ...(since ? { since } : {}) });
     const selected = options.all ? summaries : options.thread.map((id) => {
       const summary = summaries.find((item) => item.id === id);
       if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);

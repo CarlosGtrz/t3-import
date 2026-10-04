@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type {
@@ -29,6 +30,7 @@ import {
 import { sourceError } from "../core/errors.js";
 import { walkFiles } from "./files.js";
 import { CodexAppServerSession, type CodexThreadMetadata } from "./codexAppServer.js";
+import { normalizeCodexHistory } from "./codexHistory.js";
 
 const SYNTHETIC_PREFIXES = ["<recommended_plugins>", "<environment_context>", "<app-context>", "<permissions instructions>"];
 
@@ -505,7 +507,7 @@ async function fastSummaries(options: DiscoveryOptions): Promise<SourceSummary[]
       const fileStat = await stat(path);
       const fallback = fileStat.mtime.toISOString();
       const header = await readRolloutHeader(path, fallback);
-      if (!header || header.child) return undefined;
+      if (!header || (header.child && !options.includeSubagents)) return undefined;
       if (options.workspace && canonicalPath(header.workspace) !== canonicalPath(options.workspace)) return undefined;
       const updatedAt = indexedUpdates.get(header.id) ?? fallback;
       if (options.since && new Date(updatedAt) < options.since) return undefined;
@@ -551,26 +553,59 @@ export class CodexSource implements SourceAdapter {
 
   async discover(options: DiscoveryOptions): Promise<SourceSummary[]> {
     const summaries = await fastSummaries(options);
-    this.metadataWarmup ??= this.session()
-      .then((session) => session.list(options.workspace))
+    await (this.metadataWarmup ??= this.session()
+      .then((session) => session.list(options.workspace, options.includeSubagents))
       .then((app) => { this.appMetadata = new Map(app.map((entry) => [entry.id, entry])); })
       .catch(() => { this.appMetadata.clear(); })
-      .finally(() => { this.metadataWarmup = undefined; });
+      .finally(() => { this.metadataWarmup = undefined; }));
+    const known = new Set(summaries.map((summary) => summary.id));
+    for (const metadata of this.appMetadata.values()) {
+      if (known.has(metadata.id) || !metadata.cwd || (metadata.parentThreadId && !options.includeSubagents)) continue;
+      if (options.workspace && canonicalPath(metadata.cwd) !== canonicalPath(options.workspace)) continue;
+      const createdAt = appTimestamp(metadata.createdAt, new Date(0).toISOString());
+      const updatedAt = appTimestamp(metadata.updatedAt, createdAt);
+      if (options.since && new Date(updatedAt) < options.since) continue;
+      summaries.push({ source: "codex", id: metadata.id,
+        title: metadata.name ?? deriveTitle(metadata.preview ?? "", `Codex conversation ${metadata.id.slice(0, 8)}`),
+        workspace: metadata.cwd, path: stringValue(metadata.raw?.path) ?? `codex-api:${metadata.id}`,
+        createdAt, updatedAt, status: "complete", branches: 1, archived: metadata.archived ?? false,
+        ...(metadata.parentThreadId ? { parentId: metadata.parentThreadId } : {}) });
+    }
     for (const summary of summaries) {
       const metadata = this.appMetadata.get(summary.id);
       if (metadata?.name) summary.title = metadata.name;
       else if (metadata?.preview) summary.title = deriveTitle(metadata.preview);
       if (metadata?.parentThreadId) summary.parentId = metadata.parentThreadId;
       if (metadata?.updatedAt !== undefined) summary.updatedAt = appTimestamp(metadata.updatedAt, summary.updatedAt);
+      if (metadata?.archived !== undefined) summary.archived = metadata.archived;
     }
     return summaries
-      .filter((summary) => !summary.parentId)
+      .filter((summary) => options.includeSubagents || !summary.parentId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   async load(summary: SourceSummary, options: DiscoveryOptions): Promise<CanonicalConversation> {
     try {
-      const fileStat = await stat(summary.path);
+      let fileStat;
+      try { fileStat = await stat(summary.path); }
+      catch (error) { if (!isObject(error) || error.code !== "ENOENT") throw error; }
+      if (!fileStat || this.appMetadata.get(summary.id)?.raw?.historyMode === "paginated") {
+        const history = await (await this.session()).history(summary.id);
+        // Older stored rollouts can outlive their API history rows. Only an
+        // explicitly empty history permits falling back to a readable file.
+        if (!fileStat || !Array.isArray(history.turns) || history.turns.length > 0) {
+          const thread = await normalizeCodexHistory(history, summary, options.includeIncomplete ?? false);
+          if (summary.archived) thread.warnings.push("Source Codex chat is archived; T3 imports it as a visible task.");
+          const fingerprint = createHash("sha256");
+          for (const turn of thread.turns) {
+            const { assistant, activities, plans, ...metadata } = turn;
+            fingerprint.update(JSON.stringify(metadata));
+            for (const item of [...assistant, ...activities, ...plans]) fingerprint.update(JSON.stringify(item));
+        }
+        return { summary: { ...summary, title: thread.title, status: thread.ignoredInProgressTurns ? "incomplete" : "complete" },
+          threads: [thread], fingerprint: fingerprint.digest("hex") };
+        }
+      }
       const snapshot = await readStableJsonl(summary.path);
       let appThread: Record<string, unknown> | null = this.appMetadata.get(summary.id)?.raw ?? null;
       try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }

@@ -32,6 +32,7 @@ export function escapeDestination(screen: Screen, history: Screen[]): Screen | u
 }
 
 interface TuiProps {
+  includeSubagents?: boolean;
   paths: TargetPaths;
   initialSource?: SourceName;
   initialWorkspace?: string;
@@ -149,7 +150,7 @@ export function replacementStatusText(preview: ConversationReplacePreview | unde
   return "target missing";
 }
 
-export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false }: TuiProps): React.JSX.Element {
+export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false, includeSubagents = false }: TuiProps): React.JSX.Element {
   const app = useApp();
   const [screen, setScreen] = useState<Screen>("preflight");
   const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
@@ -258,7 +259,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   useEffect(() => {
     if (screen !== "workspace") return;
     setIndex(0);
-    sourceAdapter(source).discover({}).then((items) => {
+    sourceAdapter(source).discover({ includeSubagents }).then((items) => {
       setSummaries(items);
       const selectedWorkspace = initialWorkspace
         ? items.find((item) => item.workspace.toLowerCase() === initialWorkspace.toLowerCase())?.workspace
@@ -271,7 +272,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         setScreen("threads");
       }
     }).catch((cause) => { setError(cause instanceof Error ? cause.message : String(cause)); setScreen("error"); });
-  }, [screen, source]);
+  }, [screen, source, includeSubagents]);
 
   useEffect(() => {
     if (screen !== "threads" || !workspace) return;

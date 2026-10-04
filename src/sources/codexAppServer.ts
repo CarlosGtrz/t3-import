@@ -117,39 +117,89 @@ export class CodexAppServerSession {
     }
   }
 
-  async list(workspace?: string): Promise<CodexThreadMetadata[]> {
+  async list(workspace?: string, includeSubagents = false): Promise<CodexThreadMetadata[]> {
     const output: CodexThreadMetadata[] = [];
-    let cursor: string | null = null;
-    do {
-      const result = await this.client.request("thread/list", {
-        cursor,
-        limit: 100,
-        sortKey: "updated_at",
-        ...(workspace ? { cwd: [workspace] } : {}),
-      }, 30_000);
-      if (!isObject(result) || !Array.isArray(result.data)) break;
-      for (const value of result.data) {
-        if (!isObject(value) || typeof value.id !== "string") continue;
-        output.push({
-          id: value.id,
-          ...(typeof value.name === "string" && value.name.trim() ? { name: value.name } : {}),
-          ...(typeof value.preview === "string" ? { preview: value.preview } : {}),
-          ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
-          ...(typeof value.model === "string" ? { model: value.model } : {}),
-          ...(typeof value.createdAt === "number" ? { createdAt: value.createdAt } : {}),
-          ...(typeof value.updatedAt === "number" ? { updatedAt: value.updatedAt } : {}),
-          ...(typeof value.parentThreadId === "string" ? { parentThreadId: value.parentThreadId } : {}),
-          raw: value,
-        });
-      }
-      cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
-    } while (cursor);
+    for (const archived of [false, true]) {
+      let cursor: string | null = null;
+      const cursors = new Set<string>();
+      do {
+        const result = await this.client.request("thread/list", {
+          cursor,
+          limit: 100,
+          sortKey: "updated_at",
+          modelProviders: [],
+          useStateDbOnly: true,
+          archived,
+          ...(includeSubagents ? { sourceKinds: ["cli", "vscode", "exec", "appServer", "subAgent", "unknown"] } : {}),
+          ...(workspace ? { cwd: [workspace] } : {}),
+        }, 30_000);
+        if (!isObject(result) || !Array.isArray(result.data)) throw new Error("Invalid Codex thread/list page");
+        for (const value of result.data) {
+          if (!isObject(value) || typeof value.id !== "string") continue;
+          const source = isObject(value.source) && isObject(value.source.subAgent) ? value.source.subAgent : undefined;
+          const spawn = source && isObject(source.thread_spawn) ? source.thread_spawn : undefined;
+          const parentId = typeof value.parentThreadId === "string" ? value.parentThreadId : spawn?.parent_thread_id;
+          output.push({
+            id: value.id,
+            archived,
+            ...(typeof value.name === "string" && value.name.trim() ? { name: value.name } : {}),
+            ...(typeof value.preview === "string" ? { preview: value.preview } : {}),
+            ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
+            ...(typeof value.model === "string" ? { model: value.model } : {}),
+            ...(typeof value.createdAt === "number" ? { createdAt: value.createdAt } : {}),
+            ...(typeof value.updatedAt === "number" ? { updatedAt: value.updatedAt } : {}),
+            ...(typeof parentId === "string" ? { parentThreadId: parentId } : {}),
+            raw: value,
+          });
+        }
+        cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
+        if (cursor && cursors.has(cursor)) throw new Error("Codex thread/list repeated a pagination cursor");
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
+    }
     return output;
   }
 
   async read(threadId: string): Promise<Record<string, unknown> | null> {
     const result = await this.client.request("thread/read", { threadId, includeTurns: true }, 12_000);
     return isObject(result) && isObject(result.thread) ? result.thread : null;
+  }
+
+  /** Read persisted history without resuming a thread or starting provider work. */
+  async history(threadId: string): Promise<Record<string, unknown>> {
+    const result = await this.client.request("thread/read", { threadId, includeTurns: false }, 30_000);
+    if (!isObject(result) || !isObject(result.thread)) throw new Error("Codex thread/read returned no thread");
+    const thread = result.thread;
+    if (thread.historyMode !== "paginated") {
+      const hydrated = await this.read(threadId);
+      if (!hydrated) throw new Error("Codex thread/read returned no history");
+      return hydrated;
+    }
+    const turns = await this.pages("thread/turns/list", { threadId, itemsView: "notLoaded" });
+    for (const turn of turns) {
+      if (typeof turn.id !== "string") throw new Error("Invalid Codex history turn");
+      const entries = await this.pages("thread/items/list", { threadId, turnId: turn.id });
+      if (entries.some((entry) => entry.turnId !== turn.id || !isObject(entry.item))) throw new Error("Invalid Codex history item");
+      turn.itemEntries = entries;
+    }
+    return { ...thread, turns };
+  }
+
+  private async pages(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    const output: Record<string, unknown>[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const result = await this.client.request(method, { ...params, cursor, limit: 50, sortDirection: "asc" }, 30_000);
+      if (!isObject(result) || !Array.isArray(result.data) || result.data.some((item) => !isObject(item))) {
+        throw new Error(`Invalid Codex ${method} page`);
+      }
+      output.push(...result.data as Record<string, unknown>[]);
+      cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
+      if (cursor && cursors.has(cursor)) throw new Error(`Codex ${method} repeated a pagination cursor`);
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return output;
   }
 
   async close(): Promise<void> {
@@ -173,6 +223,7 @@ async function withSession<T>(operation: (session: CodexAppServerSession) => Pro
 
 export interface CodexThreadMetadata {
   id: string;
+  archived?: boolean;
   name?: string;
   preview?: string;
   cwd?: string;

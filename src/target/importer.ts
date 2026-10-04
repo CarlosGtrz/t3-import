@@ -204,7 +204,7 @@ function planMessageAttachments(
   const descriptors: PlannedAsset["descriptor"][] = [];
   const assets: PlannedAsset[] = [];
   const notes: string[] = [];
-  for (const attachment of message.attachments.slice(0, 8)) {
+  for (const attachment of message.attachments) {
     const extension = imageExtension[attachment.mimeType];
     if (!extension || attachment.sizeBytes > 10 * 1024 * 1024 || attachment.remoteUrl) {
       const reason = attachment.remoteUrl ? "remote images are not downloaded" : !extension ? `unsupported MIME type ${attachment.mimeType}` : "image exceeds 10 MB";
@@ -217,7 +217,6 @@ function planMessageAttachments(
     descriptors.push(descriptor);
     assets.push({ descriptor, ...(attachment.data ? { data: attachment.data } : {}), ...(attachment.path ? { sourcePath: attachment.path } : {}), finalPath: join(paths.attachmentsDir, `${id}${extension}`) });
   }
-  if (message.attachments.length > 8) warnings.push(`Message ${message.sourceId} has more than eight images; extras were skipped.`);
   return { descriptors, assets, text: [message.text, ...notes].filter(Boolean).join("\n\n") };
 }
 

@@ -6,7 +6,9 @@ Compatibility is intentionally explicit: **T3 migrations 40–53**, Node.js 22 o
 
 ## How it works
 
-`t3-import` reads local Codex conversations through `codex app-server` and Codex rollout JSONL files. It reads Claude Code sessions from the JSONL files under `~/.claude/projects/`. The source data is normalized into conversations, turns, messages, tool activity, plans, usage, and supported image attachments.
+`t3-import` reads local Codex conversations through `codex app-server` and Codex rollout JSONL files. Database-backed chats are discovered through the API even when their rollout file is missing; paginated history is read completely without resuming the source chat. Legacy chats still use rollout files; newer paginated chats use the API even when a rollout file exists. If the API explicitly returns no turns, a readable rollout is used instead. API errors and malformed pages still fail without silently substituting a file. It reads Claude Code sessions from the JSONL files under `~/.claude/projects/`. The source data is normalized into conversations, turns, messages, tool activity, plans, usage, and supported image attachments.
+
+When an API image points to an expired local file, the importer recovers its embedded bytes from the matching plain or compressed rollout, including compaction replacement history. Recovery requires the same thread ID and exact original path; it never substitutes a same-named file or a tool image. Conflicting or unavailable copies remain explicit warnings. Compressed image recovery requires Node.js 22.15 or newer.
 
 To keep T3 startup bounded, imports preserve every message, turn boundary, plan, image, error or approval, context compaction, and resume binding while compacting repetitive activity telemetry. Context-window snapshots are omitted, and long turns retain the latest visible reasoning summary plus a representative significant tool activity. The importer rejects any write that would exceed T3's safe one-launch projection budget.
 
@@ -111,6 +113,11 @@ When `--json` is active, stdout contains one versioned JSON value and diagnostic
 `doctor` reports database compatibility and integrity, live/stale runtime state, discovered IndexedDB caches, source availability, and attachment staging leftovers without changing anything. `t3-import cache reset` can perform the same recoverable cache reset without importing, synchronizing, or replacing anything. Both operations require T3 to be closed.
 
 ## Source behavior
+
+Codex discovery includes archived chats. Archived source chats become visible T3 tasks, with a warning; Codex sidebar sections and project display settings are not copied. `--include-subagents` additionally imports child-agent conversations as separate tasks. Automatic continuation turns without a recorded user message retain their output with an explicit continuation placeholder. Missing local images are reported with a visible placeholder while the rest of the chat is preserved. The Codex API must expose readable local history; metadata-only or inaccessible chats fail with a source error. If an already imported chat switches from rollout to API history, synchronization still validates the unchanged canonical prefix and reports a conflict instead of guessing message identity.
+
+Some internal child-agent chats have readable history but are omitted by Codex's `thread/list` API. `--include-subagents` can discover only the chats that API lists (or that have readable rollout files). The importer does not inspect Codex's private SQLite layout to enumerate omitted chats or recover API timeouts.
+
 
 Codex discovery prefers the normalized `codex app-server` API and augments it with rollout JSONL; it falls back to rollout files when app-server is unavailable. Claude discovery streams project JSONL and reconstructs its UUID graph. Automatic compaction roots are reconnected through validated `logicalParentUuid` links, and unambiguous successful API-retry forks are linearized while retaining their retry activity. Genuine alternate Claude leaves that remain become separate historical T3 tasks; only the current leaf receives a resume binding.
 

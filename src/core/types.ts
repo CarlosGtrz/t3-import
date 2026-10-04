@@ -14,6 +14,7 @@ export interface SourceSummary {
   status: "complete" | "incomplete";
   branches: number;
   parentId?: string;
+  archived?: boolean;
 }
 
 export interface SourceAttachment {
@@ -88,6 +89,7 @@ export interface CanonicalConversation {
 }
 
 export interface DiscoveryOptions {
+  includeSubagents?: boolean;
   workspace?: string;
   since?: Date;
   includeIncomplete?: boolean;
