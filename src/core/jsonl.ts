@@ -1,5 +1,5 @@
 import { createReadStream, statSync } from "node:fs";
-import { createInterface } from "node:readline";
+import * as zlib from "node:zlib";
 import { sha256 } from "./util.js";
 
 export interface JsonlSnapshot {
@@ -9,12 +9,46 @@ export interface JsonlSnapshot {
   size: number;
 }
 
+/** Stream plain or Zstandard-compressed JSONL; closing a prefix read also closes the file. */
+export async function* readJsonlLines(path: string): AsyncGenerator<string> {
+  const compressed = path.endsWith(".zst");
+  if (compressed && typeof zlib.createZstdDecompress !== "function") {
+    throw new Error("Compressed Codex archives require Node.js 22.15 or newer.");
+  }
+  const source = createReadStream(path);
+  const decoder = compressed ? zlib.createZstdDecompress() : undefined;
+  const input = decoder ?? source;
+  if (decoder) {
+    source.on("error", (error) => input.destroy(error));
+    input.once("close", () => source.destroy());
+    source.pipe(decoder);
+  }
+  input.setEncoding("utf8");
+  let pending = "";
+  try {
+    // JSON strings may contain literal U+2028/U+2029. readline treats these as
+    // separators, but JSONL records are delimited only by LF (or CRLF).
+    for await (const chunk of input) {
+      pending += chunk;
+      let newline;
+      while ((newline = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        yield line.endsWith("\r") ? line.slice(0, -1) : line;
+      }
+    }
+    if (pending) yield pending;
+  } finally {
+    input.destroy();
+    source.destroy();
+  }
+}
+
 async function readOnce(path: string): Promise<JsonlSnapshot> {
   const before = statSync(path);
   const rows: unknown[] = [];
   const hashParts: string[] = [];
-  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of lines) {
+  for await (const line of readJsonlLines(path)) {
     if (!line.trim()) continue;
     hashParts.push(line, "\n");
     try {

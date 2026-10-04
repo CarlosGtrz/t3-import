@@ -1,8 +1,9 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-export async function walkFiles(root: string, extension: string): Promise<string[]> {
+export async function walkFiles(root: string, extension: string | readonly string[]): Promise<string[]> {
   const output: string[] = [];
+  const extensions = typeof extension === "string" ? [extension] : extension;
   const visit = async (directory: string): Promise<void> => {
     let entries;
     try {
@@ -14,7 +15,7 @@ export async function walkFiles(root: string, extension: string): Promise<string
       entries.map(async (entry) => {
         const path = join(directory, entry.name);
         if (entry.isDirectory()) await visit(path);
-        else if (entry.isFile() && entry.name.endsWith(extension)) output.push(path);
+        else if (entry.isFile() && extensions.some((suffix) => entry.name.endsWith(suffix))) output.push(path);
       }),
     );
   };

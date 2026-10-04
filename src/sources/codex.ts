@@ -1,8 +1,6 @@
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
-import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import type {
   CanonicalActivity,
   CanonicalConversation,
@@ -16,7 +14,7 @@ import type {
   SourceAttachment,
   SourceSummary,
 } from "../core/types.js";
-import { readStableJsonl } from "../core/jsonl.js";
+import { readJsonlLines, readStableJsonl } from "../core/jsonl.js";
 import {
   canonicalPath,
   deriveTitle,
@@ -238,6 +236,8 @@ function parseRows(
   const turns: PendingTurn[] = [];
   let recordIndex = 0;
   let lastUsageSignature: string | undefined;
+  const warnings: string[] = [];
+  const hasContent = (turn: PendingTurn): boolean => Boolean(turn.users.length || turn.assistant.length || turn.activities.length || turn.plans.length);
 
   const ensureTurn = (timestamp: string, id?: string): PendingTurn => {
     if (!active) active = newPending(id ?? `turn-${recordIndex}`, timestamp);
@@ -277,7 +277,7 @@ function parseRows(
       const eventType = stringValue(payload.type) ?? "";
       const turnId = stringValue(payload.turn_id);
       if (eventType === "task_started") {
-        if (active?.users.length) turns.push(active);
+        if (active && hasContent(active)) turns.push(active);
         active = newPending(turnId ?? `turn-${recordIndex}`, isoTimestamp(payload.started_at, timestamp));
       } else if (eventType === "task_complete") {
         const turn = findTurn(turnId);
@@ -341,10 +341,13 @@ function parseRows(
     }
     if (type !== "response_item") continue;
     const itemType = stringValue(payload.type) ?? "";
-    if (itemType === "message") {
-      const role = payload.role;
+    if (itemType === "message" || itemType === "agent_message") {
+      const role = itemType === "agent_message" ? "user" : payload.role;
       if (role !== "user" && role !== "assistant") continue;
       const parsed = textParts(payload.content, role);
+      if (itemType === "agent_message") {
+        warnings.push("Imported a Codex agent message as turn input; encrypted message portions are not decoded.");
+      }
       if (!parsed.text && parsed.attachments.length === 0) continue;
       if (role === "user" && SYNTHETIC_PREFIXES.some((prefix) => parsed.text.startsWith(prefix))) continue;
       const turn = ensureTurn(timestamp, stringValue(payload.turn_id));
@@ -384,7 +387,7 @@ function parseRows(
       }
     }
   }
-  if (active?.users.length) turns.push(active);
+  if (active && hasContent(active)) turns.push(active);
   if (!sessionId) throw sourceError(`Codex rollout has no session id: ${filePath}`);
   workspace = workspace ?? (appThread ? stringValue(appThread.cwd) : undefined);
   if (!workspace) throw sourceError(`Codex rollout has no workspace: ${filePath}`);
@@ -405,28 +408,37 @@ function parseRows(
     }
   }
 
-  const ignoredInProgressTurns = turns.filter((turn) => turn.status === "inProgress" && turn.users.length > 0).length;
+  const ignoredInProgressTurns = turns.filter((turn) => turn.status === "inProgress" && hasContent(turn)).length;
+  let previousMessageTime = Number.NEGATIVE_INFINITY;
+  const orderedMessage = (message: CanonicalMessage): CanonicalMessage => {
+    const time = Math.max(Date.parse(message.timestamp), previousMessageTime + 1);
+    previousMessageTime = time;
+    return { ...message, timestamp: new Date(time).toISOString() };
+  };
   const canonicalTurns: CanonicalTurn[] = turns.flatMap((turn) => {
     if (turn.status === "inProgress" && !includeIncomplete) return [];
-    if (turn.users.length === 0) return [];
-    const [first, ...rest] = turn.users;
-    const user: CanonicalMessage = {
-      ...first!,
-      text: [first!.text, ...rest.map((entry) => entry.text)].filter(Boolean).join("\n\n"),
-      attachments: turn.users.flatMap((entry) => entry.attachments).slice(0, 8),
-    };
-    return [{ id: turn.id, startedAt: turn.startedAt, ...(turn.completedAt ? { completedAt: turn.completedAt } : {}), status: turn.status, ...(turn.terminalReason ? { terminalReason: turn.terminalReason } : {}), ...(turn.terminalError ? { terminalError: turn.terminalError } : {}), user, assistant: turn.assistant, activities: turn.activities, plans: turn.plans }];
+    if (!hasContent(turn)) return [];
+    const [recorded, ...rest] = turn.users;
+    const first: CanonicalMessage = recorded ?? {sourceId:`${turn.id}:continuation`,role:"user",text:"[Codex continuation without a recorded user message]",timestamp:turn.startedAt,attachments:[]};
+    if (!recorded) warnings.push(`Turn ${turn.id} uses a continuation placeholder because no user message was recorded.`);
+    const user = orderedMessage({
+      ...first,
+      text: [first.text, ...rest.map((entry) => entry.text)].filter(Boolean).join("\n\n"),
+      attachments: turn.users.flatMap((entry) => entry.attachments),
+    });
+    const assistant = turn.assistant.map(orderedMessage);
+    return [{ id: turn.id, startedAt: turn.startedAt, ...(turn.completedAt ? { completedAt: turn.completedAt } : {}), status: turn.status, ...(turn.terminalReason ? { terminalReason: turn.terminalReason } : {}), ...(turn.terminalError ? { terminalError: turn.terminalError } : {}), user, assistant, activities: turn.activities, plans: turn.plans }];
   });
-  const allWithUsers = turns.filter((turn) => turn.users.length > 0);
-  if (allWithUsers.length === 0) throw sourceError(`No importable Codex turns in ${filePath}`);
+  const allWithContent = turns.filter(hasContent);
+  if (allWithContent.length === 0) throw sourceError(`No importable Codex turns in ${filePath}`);
   const firstCanonical = canonicalTurns[0];
-  const firstPending = allWithUsers[0]!;
+  const firstPending = allWithContent[0]!;
   const lastCanonical = canonicalTurns.at(-1);
-  const lastPending = allWithUsers.at(-1)!;
-  const firstUserText = firstCanonical?.user.text ?? firstPending.users[0]!.text;
+  const lastPending = allWithContent.at(-1)!;
+  const firstUserText = firstCanonical?.user.text ?? firstPending.users[0]?.text ?? "Codex continuation";
   const lastUpdatedAt = lastCanonical
     ? lastCanonical.completedAt ?? lastCanonical.assistant.at(-1)?.timestamp ?? lastCanonical.user.timestamp
-    : lastPending.completedAt ?? lastPending.assistant.at(-1)?.timestamp ?? lastPending.users.at(-1)!.timestamp;
+    : lastPending.completedAt ?? lastPending.assistant.at(-1)?.timestamp ?? lastPending.users.at(-1)?.timestamp ?? lastPending.startedAt;
   const name = appThread && stringValue(appThread.name);
   const preview = appThread && stringValue(appThread.preview);
   return {
@@ -444,7 +456,7 @@ function parseRows(
     turns: canonicalTurns,
     ignoredInProgressTurns,
     resumeCursor: { threadId: sessionId },
-    warnings: [],
+    warnings,
   };
 }
 
@@ -456,27 +468,25 @@ interface RolloutHeader {
 }
 
 async function readRolloutHeader(path: string, fallbackTime: string): Promise<RolloutHeader | undefined> {
-  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
-  try {
-    let inspected = 0;
-    for await (const line of lines) {
-      if (!line.trim()) continue;
-      inspected += 1;
-      try {
-        const row = JSON.parse(line) as unknown;
-        if (isObject(row) && row.type === "session_meta" && isObject(row.payload)) {
-          const id = stringValue(row.payload.id) ?? stringValue(row.payload.session_id);
-          const workspace = stringValue(row.payload.cwd);
-          if (id && workspace) {
-            const threadSource = stringValue(row.payload.thread_source);
-            return { id, workspace, createdAt: isoTimestamp(row.payload.timestamp, isoTimestamp(row.timestamp, fallbackTime)), child: Boolean(threadSource && threadSource !== "user") };
-          }
+  let inspected = 0;
+  for await (const line of readJsonlLines(path)) {
+    if (!line.trim()) continue;
+    inspected += 1;
+    try {
+      const row = JSON.parse(line) as unknown;
+      if (isObject(row) && row.type === "session_meta" && isObject(row.payload)) {
+        const id = stringValue(row.payload.id) ?? stringValue(row.payload.session_id);
+        const workspace = stringValue(row.payload.cwd);
+        if (id && workspace) {
+          const threadSource = stringValue(row.payload.thread_source);
+          const source = isObject(row.payload.source) ? row.payload.source : undefined;
+          return { id, workspace, createdAt: isoTimestamp(row.payload.timestamp, isoTimestamp(row.timestamp, fallbackTime)), child: Boolean((threadSource && threadSource !== "user") || source?.subagent || source?.subAgent) };
         }
-      } catch { /* selected loads report malformed JSONL precisely */ }
-      if (inspected >= 32) return undefined;
-    }
-    return undefined;
-  } finally { lines.close(); }
+      }
+    } catch { /* selected loads report malformed JSONL precisely */ }
+    if (inspected >= 32) return undefined;
+  }
+  return undefined;
 }
 
 function appTimestamp(value: number | undefined, fallback: string): string {
@@ -499,7 +509,9 @@ async function fastSummaries(options: DiscoveryOptions): Promise<SourceSummary[]
   } catch {
     // Older Codex installations may not have a session index.
   }
-  const files = await walkFiles(join(codexRoot(), "sessions"), ".jsonl");
+  const files = (await Promise.all(["sessions", "archived_sessions"].map((directory) =>
+    walkFiles(join(codexRoot(), directory), [".jsonl", ".jsonl.zst"]),
+  ))).flat().sort((left, right) => Number(left.endsWith(".zst")) - Number(right.endsWith(".zst")) || left.localeCompare(right));
   const values = await Promise.all(files.map(async (path): Promise<SourceSummary | undefined> => {
     try {
       const fileStat = await stat(path);
@@ -524,7 +536,9 @@ async function fastSummaries(options: DiscoveryOptions): Promise<SourceSummary[]
       return undefined;
     }
   }));
-  return values.filter((value): value is SourceSummary => Boolean(value));
+  const unique = new Map<string, SourceSummary>();
+  for (const value of values) if (value && !unique.has(value.id)) unique.set(value.id, value);
+  return [...unique.values()];
 }
 
 export class CodexSource implements SourceAdapter {
