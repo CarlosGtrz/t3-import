@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { importConversations } from "../src/target/importer.js";
+import { importConversations, prepareThreadForImport, exceedsProjectionBudget } from "../src/target/importer.js";
 import { canonicalConversation, canonicalThread, createTarget, eventCount } from "./helpers.js";
 
 import { SUPPORTED_MIGRATIONS } from "../src/target/schema.js";
@@ -95,7 +95,7 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
     expect(eventCount(paths.dbPath)).toBe(0);
   });
 
-  it("compacts repetitive activity telemetry before planning events", async () => {
+  it("reduces activity only by explicit request", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-compact-"));
     const workspace = join(root, "workspace");
     mkdirSync(workspace);
@@ -111,11 +111,29 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
     const result = await importConversations(
       [{ conversation: canonicalConversation(workspace, thread), resume: true }],
       paths,
-      { dryRun: true, resume: true },
+      { dryRun: true, resume: true, compactActivity: true },
     );
     expect(result.results[0]!.activities).toBe(3);
     expect(result.results[0]!.warnings).toContainEqual(expect.stringContaining("Compacted 27 source activities to 3"));
     expect(eventCount(paths.dbPath)).toBe(0);
+  });
+
+  it("preserves distinct tools, every failure, reasoning and usage by default", () => {
+    const thread = canonicalThread("/workspace");
+    const activity = thread.turns[0]!.activities[0]!;
+    thread.turns[0]!.activities = [
+      ...Array.from({length:4},(_,i)=>({...activity,sourceId:`tool-${i}`,tone:i<2?"error" as const:"tool" as const,payload:{itemType:"command_execution",status:i<2?"failed":"completed",detail:`unique output ${i}`}})),
+      {...activity,sourceId:"reasoning-1",kind:"reasoning.summary",payload:{detail:"first summary"}},
+      {...activity,sourceId:"reasoning-2",kind:"reasoning.summary",payload:{detail:"second summary"}},
+      {...activity,sourceId:"usage",kind:"context-window.updated",payload:{usedTokens:100}},
+    ];
+    expect(prepareThreadForImport(thread)).toEqual(thread);
+    const reduced = prepareThreadForImport(thread,true).turns[0]!.activities;
+    expect(reduced.filter(a=>a.tone==="error")).toHaveLength(2);
+    expect(reduced.some(a=>a.sourceId==="usage")).toBe(false);
+    expect(reduced.some(a=>a.sourceId==="reasoning-2")).toBe(true);
+    expect(exceedsProjectionBudget(53,1001)).toBe(true);
+    expect(exceedsProjectionBudget(54,10001)).toBe(false);
   });
 
   it("rejects an import that cannot fit in one safe projection batch", async () => {
@@ -133,11 +151,13 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
       activities: fixtureTurn.activities.map((activity) => ({ ...activity, sourceId: `${activity.sourceId}-${index}` })),
     }));
 
-    await expect(importConversations(
+    const result = importConversations(
       [{ conversation: canonicalConversation(workspace, thread), resume: true }],
       paths,
       { dryRun: true, resume: true },
-    )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
+    );
+    if (fixtureMigration >= 54) expect((await result).results[0]!.events).toBeGreaterThan(900);
+    else await expect(result).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
     expect(eventCount(paths.dbPath)).toBe(0);
   });
 

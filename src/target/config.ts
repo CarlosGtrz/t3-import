@@ -9,6 +9,7 @@ export interface TargetOverrides {
   dbPath?: string;
   attachmentsDir?: string;
   providerInstance?: string;
+  compactActivity?: boolean;
 }
 
 export function resolveTargetPaths(overrides: TargetOverrides = {}): TargetPaths {

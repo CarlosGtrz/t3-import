@@ -22,7 +22,8 @@ import {
   IMPORTER_VERSION,
   MAX_SAFE_IMPORT_EVENTS,
   acquireLock,
-  compactThreadForImport,
+  prepareThreadForImport,
+  exceedsProjectionBudget,
   createBackup,
   event,
   materializeAssets,
@@ -353,10 +354,10 @@ function conflictResult(thread: CanonicalThread, status: SyncItemResult["status"
   };
 }
 
-function buildPlan(db: Database.Database, paths: TargetPaths, conversation: CanonicalConversation, dryRun: boolean): SyncPlan {
+function buildPlan(db: Database.Database, paths: TargetPaths, conversation: CanonicalConversation, dryRun: boolean, compactActivity = false): SyncPlan {
   const sourceThread = conversation.threads.find((thread) => thread.currentBranch) ?? conversation.threads[0];
   if (!sourceThread) throw writeError(`Conversation ${conversation.summary.id} has no importable task.`);
-  const thread = compactThreadForImport({ ...sourceThread, turns: sourceThread.turns.filter(isTerminalTurn) });
+  const thread = prepareThreadForImport({ ...sourceThread, turns: sourceThread.turns.filter(isTerminalTurn) }, compactActivity);
   if (thread.turns.length === 0 && (thread.ignoredInProgressTurns ?? 0) > 0) {
     const result = conflictResult(thread, "not-imported", "Conversation has no terminal turns; its active turn was ignored.");
     return { conversation, thread, result, titleEvent: false, previouslyImported: false };
@@ -396,7 +397,12 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   }
   const provider = existingProvider(db, thread, record, events);
   const syncThread = { ...thread, turns: newTurns, warnings };
-  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, checkpoint.turns.length + adopted, false);
+  const previousActivityTime = events.reduce((latest, row) => {
+    if (row.type !== "thread.activity-appended" || !isObject(row.payload.activity)) return latest;
+    const time = new Date(stringValue(row.payload.activity.createdAt) ?? "").valueOf();
+    return Number.isFinite(time) ? Math.max(latest, time) : latest;
+  }, Number.NEGATIVE_INFINITY);
+  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, checkpoint.turns.length + adopted, false, {}, previousActivityTime);
   if (titleAction === "updated") {
     planned.events.push(event(
       record.identitySeed, `sync.title.${events.filter((row) => row.type === "thread.meta-updated").length}`, "thread", record.threadId,
@@ -433,11 +439,11 @@ function aggregate(results: SyncItemResult[], dryRun: boolean): SyncRunResult["s
   return synced ? "synced" : "up-to-date";
 }
 
-export async function inspectConversationSync(conversation: CanonicalConversation, paths: TargetPaths): Promise<ConversationSyncPreview> {
+export async function inspectConversationSync(conversation: CanonicalConversation, paths: TargetPaths, options: TargetOverrides = {}): Promise<ConversationSyncPreview> {
   const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
   try {
     validateTargetDatabase(db);
-    const plan = buildPlan(db, paths, conversation, false);
+    const plan = buildPlan(db, paths, conversation, false, options.compactActivity);
     const result = plan.result;
     const activeOnly = plan.thread.turns.length === 0 && (plan.thread.ignoredInProgressTurns ?? 0) > 0;
     const status: ConversationSyncPreview["status"] = activeOnly
@@ -468,7 +474,7 @@ export async function syncConversations(selections: SyncSelection[], paths: Targ
   const warnings: string[] = [];
   try {
     const schema = validateTargetDatabase(db);
-    const plans = selections.map((selection) => buildPlan(db, paths, selection.conversation, options.dryRun));
+    const plans = selections.map((selection) => buildPlan(db, paths, selection.conversation, options.dryRun, options.compactActivity));
     const writable = plans.filter((plan) => plan.planned && !hasConflict(plan.result.status));
     const eventPlans = writable.filter((plan) => plan.planned!.events.length > 0);
     const t3Plans = writable.filter((plan) => plan.planned!.events.length > 0 || plan.result.turnsAdopted > 0);
@@ -476,7 +482,7 @@ export async function syncConversations(selections: SyncSelection[], paths: Targ
       const backlog = projectionBacklog(db);
       if (backlog.backlog > 0 && !options.allowProjectionBacklog) throw safetyError(`T3 has ${backlog.backlog} unprojected event${backlog.backlog === 1 ? "" : "s"}. Open T3 and let it finish loading before synchronizing.`);
       const count = eventPlans.reduce((sum, plan) => sum + plan.planned!.events.length, 0);
-      if (count > MAX_SAFE_IMPORT_EVENTS) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. Sync fewer conversations at a time.`);
+      if (exceedsProjectionBudget(schema.migration, count)) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS} for this T3 version. Upgrade T3, sync fewer conversations, or explicitly choose --compact-activity.`);
     }
     if (options.dryRun) return { schemaVersion: 1, status: aggregate(plans.map((plan) => plan.result), true), target: paths.dbPath, migration: schema.migration, backup: null, results: plans.map((plan) => plan.result), warnings, hasConflicts: plans.some((plan) => hasConflict(plan.result.status)) };
     if (t3Plans.length > 0) backup = createBackup(db, paths);

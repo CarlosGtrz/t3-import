@@ -16,7 +16,7 @@ import type {
 } from "./core/types.js";
 import { sourceAdapter } from "./sources/index.js";
 import { inferCurrentWorkspace } from "./sources/codex.js";
-import { compactThreadForImport, importConversations } from "./target/importer.js";
+import { prepareThreadForImport, importConversations } from "./target/importer.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
 import { listProviderInstances } from "./target/config.js";
 import { inspectRuntime, type RuntimeState } from "./target/schema.js";
@@ -38,6 +38,7 @@ interface TuiProps {
   initialProvider?: string;
   mode?: "auto" | "sync" | "replace";
   resetCache?: boolean;
+  compactActivity?: boolean;
 }
 
 export function helpTextForScreen(screen: Screen, searching = false): string | undefined {
@@ -149,7 +150,7 @@ export function replacementStatusText(preview: ConversationReplacePreview | unde
   return "target missing";
 }
 
-export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false }: TuiProps): React.JSX.Element {
+export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false, compactActivity = false }: TuiProps): React.JSX.Element {
   const app = useApp();
   const [screen, setScreen] = useState<Screen>("preflight");
   const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
@@ -213,7 +214,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   );
   const importPreview = useMemo(() => preparedImports.reduce((counts, selection) => {
     for (const sourceThread of selection.conversation.threads) {
-      const thread = compactThreadForImport(sourceThread);
+      const thread = prepareThreadForImport(sourceThread, compactActivity);
       counts.tasks += 1;
       counts.turns += thread.turns.length;
       counts.messages += thread.turns.reduce((sum, turn) => sum + 1 + turn.assistant.length, 0);
@@ -221,7 +222,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       counts.attachments += thread.turns.reduce((sum, turn) => sum + turn.user.attachments.length, 0);
     }
     return counts;
-  }, { tasks: 0, turns: 0, messages: 0, activities: 0, attachments: 0 }), [preparedImports]);
+  }, { tasks: 0, turns: 0, messages: 0, activities: 0, attachments: 0 }), [preparedImports, compactActivity]);
   const syncPreview = useMemo(() => preparedSync.reduce((counts, selection) => {
     const preview = syncPreviews.get(selection.conversation.summary.id);
     counts.tasks += 1;
@@ -289,9 +290,9 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         if (!summary) return;
         try {
           const conversation = await sourceAdapter(source).load(summary, { workspace });
-          const preview = mode === "replace" ? undefined : await inspectConversationSync(conversation, paths);
+          const preview = mode === "replace" ? undefined : await inspectConversationSync(conversation, paths, { compactActivity });
           const replacement = mode === "replace" || preview?.status === "history-diverged"
-            ? await inspectConversationReplacement(conversation, paths)
+            ? await inspectConversationReplacement(conversation, paths, { compactActivity })
             : undefined;
           if (cancelled) return;
           setConversations((current) => new Map(current).set(summary.id, conversation));
@@ -386,13 +387,13 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       setScreen("running");
       const run = async () => {
         const imported = preparedImports.length
-          ? await importConversations(preparedImports, paths, { dryRun: false, resume: true, ...(provider ? { providerInstance: provider } : {}) })
+          ? await importConversations(preparedImports, paths, { dryRun: false, compactActivity, resume: true, ...(provider ? { providerInstance: provider } : {}) })
           : undefined;
         const synced = preparedSync.length
-          ? await syncConversations(preparedSync, paths, { dryRun: false, allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")) })
+          ? await syncConversations(preparedSync, paths, { dryRun: false, compactActivity, allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")) })
           : undefined;
         const replaced = preparedReplacements.length
-          ? await replaceConversations(preparedReplacements, paths, { dryRun: false })
+          ? await replaceConversations(preparedReplacements, paths, { dryRun: false, compactActivity })
           : undefined;
         const changed = Boolean(imported?.results.some((item) => item.status === "imported")) || Boolean(synced?.results.some((item) => item.status === "synced")) || Boolean(replaced?.results.some((item) => item.status === "replaced"));
         if (resetCache && changed) {

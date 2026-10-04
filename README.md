@@ -8,7 +8,9 @@ Compatibility is intentionally explicit: **T3 migrations 40–53**, Node.js 22 o
 
 `t3-import` reads local Codex conversations through `codex app-server` and Codex rollout JSONL files. It reads Claude Code sessions from the JSONL files under `~/.claude/projects/`. The source data is normalized into conversations, turns, messages, tool activity, plans, usage, and supported image attachments.
 
-To keep T3 startup bounded, imports preserve every message, turn boundary, plan, image, error or approval, context compaction, and resume binding while compacting repetitive activity telemetry. Context-window snapshots are omitted, and long turns retain the latest visible reasoning summary plus a representative significant tool activity. The importer rejects any write that would exceed T3's safe one-launch projection budget.
+Imports preserve every canonical activity by default, including distinct tool calls and outputs, failures, approvals, visible reasoning summaries, plan updates, and context-window snapshots. `--compact-activity` explicitly selects reduced history: it keeps all failures and approvals, but drops usage snapshots and retains only the latest reasoning and plan update plus one successful tool activity per turn. Reduction is never automatic.
+
+T3 migration 54 and later replay events in bounded pages, so large full-history imports are supported there. Older supported migrations retain the safe 900-event startup budget; use smaller selections, upgrade T3, or explicitly choose reduced history. Existing projection backlogs still block writes.
 
 With T3 Code closed, the importer validates the local database against the supported migration profiles and creates a verified backup. It then appends canonical events to `orchestration_events` and adds provider-session bindings for conversations that can be resumed. It does not modify T3's projection tables: T3 Code rebuilds them from the imported events the next time it starts. After a successful write, the importer also backs up and resets T3's rebuildable IndexedDB origin cache so stale task snapshots cannot hide newly imported history.
 
@@ -104,7 +106,7 @@ When `--json` is active, stdout contains one versioned JSON value and diagnostic
 - Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
 - The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
 - Imports are idempotent. A second import reports `already-imported`. `sync` only appends completed, interrupted, or failed turns after an unchanged checkpoint, and repeated syncs are no-ops. `replace` promotes one complete new task as the sole synchronization target and soft-deletes the old canonical task; repeating it against that unchanged replacement is also a no-op.
-- New imports are rejected when T3 has an existing projection backlog or when the compact event plan exceeds the safe 900-event startup budget.
+- New imports are rejected when T3 has an existing projection backlog. On migrations before 54, event plans exceeding 900 events are also rejected. The importer never silently drops activities to fit this budget.
 - Supported local image attachments are copied atomically. Remote images are referenced but not downloaded.
 - An external ledger is stored in the platform application-data directory. Event IDs provide the fallback idempotency check if the ledger is missing.
 

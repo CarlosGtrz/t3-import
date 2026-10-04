@@ -1,0 +1,37 @@
+import Database from "better-sqlite3";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, expect, it } from "vitest";
+import { importConversations } from "../src/target/importer.js";
+import { syncConversations } from "../src/target/sync.js";
+import { replaceConversations } from "../src/target/replace.js";
+import { canonicalConversation, canonicalThread, createTarget } from "./helpers.js";
+
+const roots: string[]=[];
+const originalLedger=process.env.T3_IMPORT_DATA_DIR;
+afterEach(()=>{for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});if(originalLedger===undefined)delete process.env.T3_IMPORT_DATA_DIR;else process.env.T3_IMPORT_DATA_DIR=originalLedger;});
+it("writes every distinct activity through import, incremental sync, and replacement",async()=>{
+  const root=mkdtempSync(join(tmpdir(),"t3-full-activity-"));roots.push(root);
+  const workspace=join(root,"workspace");mkdirSync(workspace);
+  const paths=createTarget(join(root,"t3"));process.env.T3_IMPORT_DATA_DIR=join(root,"ledger");
+  const thread=canonicalThread(workspace);
+  const tool=thread.turns[0]!.activities[0]!;
+  thread.turns[0]!.activities=[...Array.from({length:4},(_,i)=>({...tool,sourceId:`tool-${i}`,payload:{itemType:"command_execution",status:i<2?"failed":"completed",detail:`output ${i}`}})),{...tool,sourceId:"reasoning-1",kind:"reasoning.summary",payload:{detail:"first"}},{...tool,sourceId:"reasoning-2",kind:"reasoning.summary",payload:{detail:"second"}},{...tool,sourceId:"usage",kind:"context-window.updated",payload:{usedTokens:100}}];
+  const count=(id:string)=>{const db=new Database(paths.dbPath);try{return (db.prepare("SELECT count(*) n FROM orchestration_events WHERE stream_id=? AND event_type='thread.activity-appended'").get(id) as {n:number}).n;}finally{db.close();}};
+  const caughtUp=()=>{const db=new Database(paths.dbPath);db.prepare("INSERT OR REPLACE INTO projection_state(projector,last_applied_sequence,updated_at) SELECT 'test',MAX(sequence),'2026-01-01T00:00:00Z' FROM orchestration_events").run();db.close();};
+  const first=await importConversations([{conversation:canonicalConversation(workspace,thread),resume:true}],paths,{dryRun:false,resume:true});
+  expect(count(first.results[0]!.threadId)).toBe(7);caughtUp();
+  const second=structuredClone(thread.turns[0]!);second.id="turn-2";second.user.sourceId="user-2";second.assistant[0]!.sourceId="answer-2";
+  second.activities=second.activities.map(a=>({...a,timestamp:"2025-01-01T00:00:00.000Z"}));thread.turns.push(second);
+  expect((await syncConversations([{conversation:canonicalConversation(workspace,thread)}],paths,{dryRun:false})).hasConflicts).toBe(false);
+  expect(count(first.results[0]!.threadId)).toBe(14);caughtUp();
+  const db=new Database(paths.dbPath);
+  const ordered=db.prepare("SELECT payload_json,metadata_json FROM orchestration_events WHERE stream_id=? AND event_type='thread.activity-appended' ORDER BY json_extract(payload_json,'$.activity.createdAt'),json_extract(payload_json,'$.activity.id')").all(first.results[0]!.threadId) as Array<{payload_json:string;metadata_json:string}>;
+  db.close();
+  expect(ordered.map(r=>JSON.parse(r.metadata_json).providerTurnId+":"+JSON.parse(r.metadata_json).providerItemId)).toEqual(thread.turns.flatMap(t=>t.activities.map(a=>t.id+":"+a.sourceId)));
+  thread.turns[0]!.user.text="Edited prompt";
+  const replacement=await replaceConversations([{conversation:canonicalConversation(workspace,thread)}],paths,{dryRun:false});
+  expect(replacement.status).toBe("replaced");
+  expect(count(replacement.results[0]!.newThreadId!)).toBe(14);
+});

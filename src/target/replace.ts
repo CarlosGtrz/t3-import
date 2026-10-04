@@ -21,7 +21,8 @@ import {
   IMPORTER_VERSION,
   MAX_SAFE_IMPORT_EVENTS,
   acquireLock,
-  compactThreadForImport,
+  prepareThreadForImport,
+  exceedsProjectionBudget,
   createBackup,
   event,
   materializeAssets,
@@ -144,11 +145,11 @@ function item(
   };
 }
 
-function buildPlan(db: Database.Database, paths: TargetPaths, conversation: CanonicalConversation, dryRun: boolean): ReplacePlan {
+function buildPlan(db: Database.Database, paths: TargetPaths, conversation: CanonicalConversation, dryRun: boolean, compactActivity = false): ReplacePlan {
   const source = selectedThread(conversation);
   if (!source) throw writeError(`Conversation ${conversation.summary.id} has no importable task.`);
   const active = source.turns.some((turn) => !isTerminalTurn(turn)) || (source.ignoredInProgressTurns ?? 0) > 0;
-  const thread = compactThreadForImport({ ...source, turns: source.turns.filter(isTerminalTurn) });
+  const thread = prepareThreadForImport({ ...source, turns: source.turns.filter(isTerminalTurn) }, compactActivity);
   const match = findRecord(db, paths, thread);
   if (!match.record) {
     return { conversation, thread, result: item(thread, match.stale ? "target-missing" : "not-imported", match.stale ? "The canonical ledger entry is stale because its T3 task is missing." : "Conversation has not been imported into this T3 database.") };
@@ -215,11 +216,11 @@ function aggregate(results: ReplaceItemResult[], dryRun: boolean): ReplaceRunRes
   return "already-current";
 }
 
-export async function inspectConversationReplacement(conversation: CanonicalConversation, paths: TargetPaths): Promise<ConversationReplacePreview> {
+export async function inspectConversationReplacement(conversation: CanonicalConversation, paths: TargetPaths, options: TargetOverrides = {}): Promise<ConversationReplacePreview> {
   const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
   try {
     validateTargetDatabase(db);
-    const plan = buildPlan(db, paths, conversation, false);
+    const plan = buildPlan(db, paths, conversation, false, options.compactActivity);
     const status: ConversationReplacePreview["status"] = plan.result.status === "replaced" ? "replaceable" : plan.result.status as ConversationReplacePreview["status"];
     return {
       sourceId: plan.result.sourceId, status,
@@ -242,13 +243,13 @@ export async function replaceConversations(selections: ReplaceSelection[], paths
   const warnings: string[] = [];
   try {
     const schema = validateTargetDatabase(db);
-    const plans = selections.map((selection) => buildPlan(db, paths, selection.conversation, options.dryRun));
+    const plans = selections.map((selection) => buildPlan(db, paths, selection.conversation, options.dryRun, options.compactActivity));
     const writable = plans.filter((plan) => plan.planned && plan.deletions?.length && plan.oldRecord && plan.oldRecords?.length);
     if (writable.length > 0) {
       const backlog = projectionBacklog(db);
       if (backlog.backlog > 0) throw safetyError(`T3 has ${backlog.backlog} unprojected event${backlog.backlog === 1 ? "" : "s"}. Open T3 and let it finish loading before replacing conversations.`);
       const count = writable.reduce((sum, plan) => sum + plan.planned!.events.length + plan.deletions!.length, 0);
-      if (count > MAX_SAFE_IMPORT_EVENTS) throw safetyError(`Replacement would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. Replace fewer conversations at a time.`);
+      if (exceedsProjectionBudget(schema.migration, count)) throw safetyError(`Replacement would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS} for this T3 version. Upgrade T3, replace fewer conversations, or explicitly choose --compact-activity.`);
     }
     if (options.dryRun || writable.length === 0) {
       const results = plans.map((plan) => plan.result);
