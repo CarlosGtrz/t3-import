@@ -118,7 +118,71 @@ function canonicalMarker(seed: string): string {
   return deterministicUuid(`t3-import:event:${seed}:thread.created`);
 }
 
+const NATIVE_CODEX_SEED_PREFIX = "t3-import:native-codex:";
+
+function nativeCodexRecord(
+  db: Database.Database,
+  paths: TargetPaths,
+  thread: CanonicalThread,
+): StoredLedgerRecord | undefined {
+  const candidates = db.prepare(`
+    SELECT thread_id threadId, resume_cursor_json cursor, status
+    FROM provider_session_runtime
+    WHERE provider_name = 'codex' AND adapter_key = 'codex'
+  `).all() as Array<{ threadId: string; cursor: string | null; status: string }>;
+  const matches = candidates.filter((candidate) => {
+    if (candidate.threadId === thread.sourceSessionId || candidate.status !== "stopped") return false;
+    try {
+      const cursor = candidate.cursor ? JSON.parse(candidate.cursor) as Record<string, unknown> : {};
+      return stringValue(cursor.threadId) === thread.sourceSessionId;
+    } catch { return false; }
+  });
+  if (matches.length !== 1) return undefined;
+  const threadId = matches[0]!.threadId;
+  const events = readEvents(db, threadId);
+  const created = createEvent(events);
+  if (!created || events.some((row) => row.type === "thread.deleted")) return undefined;
+  const projectId = stringValue(created.payload.projectId);
+  if (!projectId) return undefined;
+  const project = db.prepare(`
+    SELECT payload_json payload FROM orchestration_events
+    WHERE aggregate_kind = 'project' AND stream_id = ? AND event_type = 'project.created'
+    ORDER BY sequence LIMIT 1
+  `).get(projectId) as { payload: string } | undefined;
+  if (!project) return undefined;
+  try {
+    const root = stringValue((JSON.parse(project.payload) as Record<string, unknown>).workspaceRoot);
+    if (!root || canonicalPath(root) !== canonicalPath(thread.workspace)) return undefined;
+  } catch { return undefined; }
+  const identitySeed = `${NATIVE_CODEX_SEED_PREFIX}${thread.sourceSessionId}:${threadId}`;
+  return {
+    targetId: targetId(paths), source: "codex", sourceSessionId: thread.sourceSessionId,
+    sourceKey: thread.sourceKey, sourceFingerprint: "", projectId, threadId,
+    importedAt: stringValue(created.payload.createdAt) ?? thread.createdAt,
+    importerVersion: "native-adoption", migration: targetMigration(db),
+    firstSequence: created.sequence, lastSequence: events.at(-1)?.sequence ?? created.sequence,
+    resumable: true, backupPath: "", warnings: [], identitySeed,
+    currentSourceKey: thread.sourceKey,
+    sourceTitle: stringValue(created.payload.title) ?? thread.title,
+    isCanonical: true,
+  };
+}
+
 export function validRecord(db: Database.Database, record: StoredLedgerRecord): boolean {
+  if (record.identitySeed.startsWith(NATIVE_CODEX_SEED_PREFIX)) {
+    const runtime = db.prepare(`
+      SELECT resume_cursor_json cursor FROM provider_session_runtime
+      WHERE thread_id = ? AND provider_name = 'codex' AND adapter_key = 'codex'
+    `).get(record.threadId) as { cursor: string | null } | undefined;
+    if (!runtime) return false;
+    try {
+      const cursor = runtime.cursor ? JSON.parse(runtime.cursor) as Record<string, unknown> : {};
+      const events = readEvents(db, record.threadId);
+      return stringValue(cursor.threadId) === record.sourceSessionId
+        && Boolean(createEvent(events))
+        && !events.some((row) => row.type === "thread.deleted");
+    } catch { return false; }
+  }
   return Boolean(db.prepare(`
     SELECT 1 found FROM orchestration_events
     WHERE stream_id = ? AND event_type = 'thread.created' AND event_id = ? LIMIT 1
@@ -156,7 +220,7 @@ export function fallbackRecord(db: Database.Database, paths: TargetPaths, thread
     .map((candidate) => ({ candidate, created: events.find((row) => row.eventId === canonicalMarker(candidate)) }))
     .find((candidate) => candidate.created);
   const created = matched?.created;
-  if (!created) return undefined;
+  if (!created) return thread.source === "codex" ? nativeCodexRecord(db, paths, thread) : undefined;
   seed = matched!.candidate;
   const projectId = stringValue(created.payload.projectId);
   if (!projectId) return undefined;
@@ -325,6 +389,61 @@ function eventAttachments(row: EventRow | undefined): Array<{ name: string; mime
   return attachments.length === row.payload.attachments.length ? attachments : undefined;
 }
 
+interface NativeVisibleTurn {
+  user: EventRow;
+  assistant: EventRow[];
+  status?: CanonicalTerminalTurnStatus;
+}
+
+function nativeCodexPrefixLength(thread: CanonicalThread, events: EventRow[]): number | undefined {
+  const turns: NativeVisibleTurn[] = [];
+  let active: NativeVisibleTurn | undefined;
+  for (const row of events) {
+    if (row.type === "thread.message-sent") {
+      const role = stringValue(row.payload.role);
+      if (role === "user") {
+        if (active) turns.push(active);
+        active = { user: row, assistant: [] };
+      } else if (role === "assistant" && stringValue(row.payload.text)) {
+        if (!active) return undefined;
+        // Native T3 streams can end with an empty non-streaming event for the
+        // same message ID. Keep the latest non-empty snapshot per message.
+        const messageId = stringValue(row.payload.messageId);
+        const existingIndex = messageId
+          ? active.assistant.findIndex((message) => stringValue(message.payload.messageId) === messageId)
+          : -1;
+        if (existingIndex >= 0) active.assistant[existingIndex] = row;
+        else active.assistant.push(row);
+      }
+    } else if (row.type === "thread.session-set" && active?.assistant.length && !active.status) {
+      const status = terminalStatusFromEvent(row);
+      if (status) active.status = status;
+    }
+  }
+  if (active) turns.push(active);
+  if (turns.length === 0 || turns.length > thread.turns.length) return undefined;
+
+  for (const [index, native] of turns.entries()) {
+    const source = thread.turns[index];
+    const nativeUser = stringValue(native.user.payload.text);
+    const sourceUser = source?.user.text ?? "";
+    // A resumed Codex rollout may start with a context envelope before the
+    // original T3 prompt. Accept that only when the visible prompt is its exact
+    // final segment; all later turns must match byte-for-byte.
+    const userMatches = sourceUser === nativeUser
+      || (index === 0 && sourceUser.endsWith(`\n\n${nativeUser}`));
+    const actualAttachments = eventAttachments(native.user);
+    const expectedAttachments = source ? sourceAttachments(source) : [];
+    const actualAssistant = native.assistant.map((row) => stringValue(row.payload.text) ?? "");
+    const expectedAssistant = source?.assistant.map((message) => message.text) ?? [];
+    if (!source || !userMatches || actualAttachments === undefined
+      || JSON.stringify(actualAttachments) !== JSON.stringify(expectedAttachments)
+      || JSON.stringify(actualAssistant) !== JSON.stringify(expectedAssistant)
+      || native.status !== source.status) return undefined;
+  }
+  return turns.length;
+}
+
 function claudeAdoptedTurns(thread: CanonicalThread, start: number, events: EventRow[], afterSequence: number): number {
   const messages = events.filter((row) => row.sequence > afterSequence && row.type === "thread.message-sent" && (row.payload.role === "user" || row.payload.role === "assistant"));
   let cursor = 0;
@@ -372,13 +491,16 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   if (thread.source === "claude" && conversation.summary.branches !== 1) {
     return { conversation, thread, record, result: conflictResult(thread, "branch-sync-unsupported", "Claude synchronization currently requires exactly one non-sidechain leaf.", record), titleEvent: false, previouslyImported: true };
   }
+  const nativeAdoption = record.identitySeed.startsWith(NATIVE_CODEX_SEED_PREFIX);
   const bootstrapped = record.checkpoint ? undefined : bootstrapCheckpoint(thread, record, events);
   const checkpoint = record.checkpoint ?? bootstrapped?.checkpoint;
-  const sourcePrefixLength = checkpoint ? verifiedSourcePrefixLength(thread, checkpoint) : undefined;
-  if (!checkpoint || sourcePrefixLength === undefined) {
+  const sourcePrefixLength = checkpoint
+    ? verifiedSourcePrefixLength(thread, checkpoint)
+    : nativeAdoption ? nativeCodexPrefixLength(thread, events) : undefined;
+  if (sourcePrefixLength === undefined || (!checkpoint && !nativeAdoption)) {
     return { conversation, thread, record, result: conflictResult(thread, "history-diverged", "Previously imported history is no longer an unchanged source prefix.", record), titleEvent: false, previouslyImported: true };
   }
-  const adopted = thread.source === "codex"
+  const adopted = nativeAdoption && !checkpoint ? 0 : thread.source === "codex"
     ? codexAdoptedTurns(thread, sourcePrefixLength, events, bootstrapped?.lastSequence ?? record.lastSequence)
     : claudeAdoptedTurns(thread, sourcePrefixLength, events, bootstrapped?.lastSequence ?? record.lastSequence);
   if (adopted < 0) return { conversation, thread, record, result: conflictResult(thread, "history-diverged", "T3 contains an ambiguous or partial provider turn suffix.", record), titleEvent: false, previouslyImported: true };
@@ -396,7 +518,8 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   }
   const provider = existingProvider(db, thread, record, events);
   const syncThread = { ...thread, turns: newTurns, warnings };
-  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, checkpoint.turns.length + adopted, false);
+  const turnOffset = nativeAdoption ? sourcePrefixLength : (checkpoint?.turns.length ?? sourcePrefixLength) + adopted;
+  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, turnOffset, false);
   if (titleAction === "updated") {
     planned.events.push(event(
       record.identitySeed, `sync.title.${events.filter((row) => row.type === "thread.meta-updated").length}`, "thread", record.threadId,

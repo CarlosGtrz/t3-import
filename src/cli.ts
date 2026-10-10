@@ -250,11 +250,11 @@ program.command("replace")
   });
 
 program.command("sync")
-  .description("Append new completed, interrupted, or failed turns to previously imported conversations")
+  .description("Append new turns to imported tasks and safely adopt matching native Codex threads")
   .addOption(new Option("--source <source>", "codex or claude"))
   .option("--workspace <path>")
   .option("--thread <id>", "source conversation id (repeatable)", collect, [])
-  .option("--all", "synchronize every previously imported matching conversation")
+  .option("--all", "synchronize imported tasks and adopt matching native Codex conversations")
   .option("--since <date>", "ISO date/time")
   .option("--dry-run")
   .option("--yes")

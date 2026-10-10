@@ -12,7 +12,7 @@ To keep T3 startup bounded, imports preserve every message, turn boundary, plan,
 
 With T3 Code closed, the importer validates the local database against the supported migration profiles and creates a verified backup. It then appends canonical events to `orchestration_events` and adds provider-session bindings for conversations that can be resumed. It does not modify T3's projection tables: T3 Code rebuilds them from the imported events the next time it starts. After a successful write, the importer also backs up and resets T3's rebuildable IndexedDB origin cache so stale task snapshots cannot hide newly imported history.
 
-After an initial import, `t3-import` can append newly settled Codex turns and newly settled turns from linear Claude conversations. Completed, interrupted, and failed turns are preserved; only genuinely active or indeterminate turns are ignored during synchronization. It verifies that the imported checkpoint is still an exact prefix, adopts exact turns already created by resuming through T3, and never replaces edited or deleted history. Claude sessions with multiple non-sidechain leaves after deterministic compaction and retry normalization are reported as conflicts rather than guessed.
+`sync` can append newly settled Codex turns and newly settled turns from linear Claude conversations to imported tasks. It can also adopt a native T3 Codex wrapper when its stopped provider binding points to exactly one source session in the same project. Before appending, it verifies that the wrapper's visible user and assistant history is a settled prefix of the provider transcript; a mismatch or ambiguous binding is reported as a conflict. The wrapper's T3 thread ID and local title are preserved, and the already-visible prefix is not written again. Completed, interrupted, and failed turns are preserved; only genuinely active or indeterminate turns are ignored during synchronization. Claude sessions with multiple non-sidechain leaves after deterministic compaction and retry normalization are reported as conflicts rather than guessed. This is an explicit one-shot sync; it does not watch sessions or synchronize continuously in the background.
 
 If an imported task has diverged or was created by an older importer, `replace` can create a fresh, complete canonical task from the provider transcript. The old task is soft-deleted with a `thread.deleted` event, while its immutable event stream remains available for audit. The provider instance, model, resume cursor, project, and synchronization identity move to the new task atomically. When deterministic normalization reduces a previously fragmented Claude session to one leaf, replacement consolidates every still-visible imported fragment of that session into the new task. Replacement is available for Codex and for Claude sessions with one normalized non-sidechain leaf, and it refuses to snapshot an active provider turn.
 
@@ -77,7 +77,7 @@ Sync options:
 
 ```text
 --thread <id>             Repeatable; mutually exclusive with --all
---all                     Sync previously imported conversations only
+--all                     Sync imported tasks and safely adopt matching native Codex threads
 --since <ISO date>
 --dry-run
 --yes
@@ -103,6 +103,7 @@ When `--json` is active, stdout contains one versioned JSON value and diagnostic
 - Every write creates and verifies a timestamped SQLite backup under `<state-dir>/t3-import-backups/`.
 - Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
 - The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
+- Native Codex adoption requires one stopped provider binding, an exact project-root match, and a verified visible transcript prefix. Ambiguous or divergent histories are left untouched and reported as conflicts.
 - Imports are idempotent. A second import reports `already-imported`. `sync` only appends completed, interrupted, or failed turns after an unchanged checkpoint, and repeated syncs are no-ops. `replace` promotes one complete new task as the sole synchronization target and soft-deletes the old canonical task; repeating it against that unchanged replacement is also a no-op.
 - New imports are rejected when T3 has an existing projection backlog or when the compact event plan exceeds the safe 900-event startup budget.
 - Supported local image attachments are copied atomically. Remote images are referenced but not downloaded.
