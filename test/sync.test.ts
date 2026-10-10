@@ -376,6 +376,9 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i incremental synchronization", 
   it("adopts a native Codex T3 wrapper and appends only the missing turns", async () => {
     const { paths, conversation, wrapperId } = await nativeCodexFixture("t3-sync-native-codex-");
     const before = eventCount(paths.dbPath);
+    const sequenceDb = new Database(paths.dbPath, { readonly: true });
+    const beforeSequence = (sequenceDb.prepare("SELECT COALESCE(MAX(sequence), 0) value FROM orchestration_events").get() as { value: number }).value;
+    sequenceDb.close();
     const preview = await inspectConversationSync(conversation, paths);
     expect(preview).toMatchObject({ status: "syncable", newTurns: 1, previouslyImported: true, threadId: wrapperId });
 
@@ -389,9 +392,17 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i incremental synchronization", 
     const db = new Database(paths.dbPath, { readonly: true });
     try {
       const created = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND event_type='thread.created'").get(wrapperId) as { count: number };
-      const users = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='thread.message-sent' AND json_extract(payload_json, '$.role')='user' ORDER BY sequence").all(wrapperId) as Array<{ payload: string }>;
+      const users = db.prepare("SELECT payload_json payload, metadata_json metadata FROM orchestration_events WHERE stream_id=? AND event_type='thread.message-sent' AND json_extract(payload_json, '$.role')='user' ORDER BY sequence").all(wrapperId) as Array<{ payload: string; metadata: string }>;
+      const importedMessages = db.prepare("SELECT payload_json payload, metadata_json metadata FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.message-sent'").all(wrapperId, beforeSequence) as Array<{ payload: string; metadata: string }>;
+      const importedTurnStarts = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.turn-start-requested'").get(wrapperId, beforeSequence) as { count: number };
+      const importedSessions = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.session-set'").get(wrapperId, beforeSequence) as { count: number };
       expect(created.count).toBe(1);
       expect(users.map((row) => JSON.parse(row.payload).text)).toEqual(["Hello", "Continue"]);
+      expect(importedTurnStarts.count).toBe(0);
+      expect(importedSessions.count).toBe(0);
+      expect(importedMessages).toHaveLength(2);
+      expect(importedMessages.every((row) => JSON.parse(row.metadata).historyImport === true)).toBe(true);
+      expect(importedMessages.every((row) => JSON.parse(row.payload).turnId === null)).toBe(true);
     } finally { db.close(); }
 
     const nativeTurn = secondTurn();

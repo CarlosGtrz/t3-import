@@ -520,6 +520,7 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   const syncThread = { ...thread, turns: newTurns, warnings };
   const turnOffset = nativeAdoption ? sourcePrefixLength : (checkpoint?.turns.length ?? sourcePrefixLength) + adopted;
   const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, turnOffset, false);
+  if (nativeAdoption) markAsHistoricalTranscript(planned);
   if (titleAction === "updated") {
     planned.events.push(event(
       record.identitySeed, `sync.title.${events.filter((row) => row.type === "thread.meta-updated").length}`, "thread", record.threadId,
@@ -545,6 +546,35 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
 
 function hasConflict(status: SyncItemResult["status"]): boolean {
   return ["history-diverged", "branch-sync-unsupported", "target-missing", "not-imported"].includes(status);
+}
+
+/**
+ * Native Codex wrappers already exist in T3, so newly discovered Codex turns
+ * are transcript history. Emit them with T3's history-import semantics rather
+ * than replaying them as live provider turns; a turn-start request would ask
+ * the provider to execute historical work again.
+ */
+function markAsHistoricalTranscript(planned: PlannedThread): void {
+  planned.events = planned.events
+    .filter((row) => row.type !== "thread.turn-start-requested" && row.type !== "thread.session-set")
+    .map((row) => {
+      if (row.type === "thread.message-sent") {
+        return {
+          ...row,
+          payload: { ...row.payload, turnId: null },
+          metadata: { ...row.metadata, historyImport: true },
+        };
+      }
+      if (row.type === "thread.activity-appended") {
+        const activity = row.payload.activity as Record<string, unknown>;
+        return {
+          ...row,
+          payload: { ...row.payload, activity: { ...activity, turnId: null } },
+          metadata: { ...row.metadata, historyImport: true },
+        };
+      }
+      return row;
+    });
 }
 
 function aggregate(results: SyncItemResult[], dryRun: boolean): SyncRunResult["status"] {
