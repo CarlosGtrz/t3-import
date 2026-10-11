@@ -43,10 +43,21 @@ t3-import import --source codex --workspace C:\src\my-project --thread <thread-i
 t3-import import --source claude --workspace C:\src\my-project --all --since 2026-01-01 --yes --non-interactive
 t3-import sync --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
 t3-import sync --source claude --workspace C:\src\my-project --all --yes --non-interactive
+t3-import sync --source codex --all --yes --summary
 t3-import replace --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
 t3-import cache reset --yes
 t3-import doctor --json
 ```
+
+### Synchronize all linked Codex conversations
+
+Close T3 Code, then run `t3-import sync --source codex --all --yes --summary` without `--workspace`. This checks existing provider bindings and import checkpoints across all projects, including scratch workspaces. It does not import unrelated Codex rollouts. Add `--dry-run` to preview without changing the target or import ledger.
+
+Only settled additions after a verified matching history are appended. Streaming message deltas and steered user inputs are reconstructed using the recorded provider turn identity. Existing T3 titles are preserved. Divergent histories, ambiguous bindings, and missing source files are skipped; safe updates in the same batch can still succeed. Exit code 7 reports these skipped cases. Separate branches are not automatically merged or replaced.
+
+Reopen T3 after the command finishes to rebuild its projections and see the changes. Writes retain the normal database backup and recoverable cache reset. For this development checkout, `bash scripts/sync-all.sh` selects an installed Node 24 through nvm and checks the native SQLite addon before running the same command. Additional flags, such as `--dry-run` or `--json`, can be passed to the script.
+
+See the [validation report](docs/codex-sync-validation.md) for automated tests, database copy checks, live application confirmation, and remaining reconciliation limits.
 
 Global target options can be placed before or after a subcommand:
 
