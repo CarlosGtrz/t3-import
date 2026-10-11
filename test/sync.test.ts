@@ -56,14 +56,15 @@ async function importedFixture(prefix: string): Promise<{ root: string; workspac
   return { root, workspace, paths, conversation };
 }
 
-async function nativeCodexFixture(prefix: string): Promise<{ workspace: string; paths: TargetPaths; conversation: CanonicalConversation; wrapperId: string }> {
+async function nativeCodexFixture(prefix: string, options: { streamed?: boolean; steered?: boolean; scratch?: boolean } = {}): Promise<{ workspace: string; paths: TargetPaths; conversation: CanonicalConversation; wrapperId: string }> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const workspace = join(root, "workspace");
   mkdirSync(workspace);
   process.env.T3_IMPORT_DATA_DIR = join(root, "source-ledger");
   const paths = createFixture(join(root, "t3"));
   const initial = canonicalThread(workspace);
-  initial.turns[0]!.user.text = "Injected provider context\n\nHello";
+  const visiblePrompt = options.steered ? "First" : "Hello";
+  initial.turns[0]!.user.text = `Injected provider context\n\n${visiblePrompt}${options.steered ? "\n\nSteer\n\nAgain" : ""}`;
   await importConversations([{ conversation: canonicalConversation(workspace, initial), resume: true }], paths, { dryRun: false, resume: true });
   const sourceId = initial.sourceSessionId;
   const wrapperId = "99999999-9999-4999-8999-999999999999";
@@ -71,6 +72,10 @@ async function nativeCodexFixture(prefix: string): Promise<{ workspace: string; 
   try {
     const original = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='thread.created'").get(sourceId) as { payload: string };
     const projectId = JSON.parse(original.payload).projectId as string;
+    if (options.scratch) {
+      const project = db.prepare("SELECT event_id id,payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='project.created'").get(projectId) as { id: string; payload: string };
+      db.prepare("UPDATE orchestration_events SET payload_json=? WHERE event_id=?").run(JSON.stringify({ ...JSON.parse(project.payload), workspaceRoot: join(root, "scratch") }), project.id);
+    }
     db.prepare("DELETE FROM orchestration_events WHERE aggregate_kind='thread' AND stream_id=?").run(sourceId);
     db.prepare("DELETE FROM provider_session_runtime WHERE thread_id=?").run(sourceId);
     const insert = db.prepare(`INSERT INTO orchestration_events (
@@ -90,7 +95,7 @@ async function nativeCodexFixture(prefix: string): Promise<{ workspace: string; 
       createdAt: initial.createdAt, updatedAt: initial.createdAt,
     });
     add("native-user", "thread.message-sent", turn.user.timestamp, "client", {
-      threadId: wrapperId, messageId, role: "user", text: "Hello", attachments: [], turnId: null,
+      threadId: wrapperId, messageId, role: "user", text: visiblePrompt, attachments: [], turnId: null,
       streaming: false, createdAt: turn.user.timestamp, updatedAt: turn.user.timestamp,
     });
     add("native-turn-start", "thread.turn-start-requested", turn.startedAt, "client", {
@@ -100,18 +105,34 @@ async function nativeCodexFixture(prefix: string): Promise<{ workspace: string; 
     add("native-running", "thread.session-set", turn.startedAt, "provider", {
       threadId: wrapperId, session: { threadId: wrapperId, status: "running", providerName: "codex", providerInstanceId: "codex", activeTurnId: turn.id },
     }, { adapterKey: "codex", providerTurnId: turn.id });
+    const answer = turn.assistant[0]!.text;
     add("native-assistant", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", {
       threadId: wrapperId, messageId: "native-assistant-message", role: "assistant", text: turn.assistant[0]!.text,
       turnId: turn.id, streaming: false, createdAt: turn.assistant[0]!.timestamp, updatedAt: turn.assistant[0]!.timestamp,
     }, { adapterKey: "codex", providerTurnId: turn.id });
+    if (options.streamed || options.steered) {
+      const first = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_id='native-assistant'").get() as { payload: string };
+      const payload = JSON.parse(first.payload);
+      db.prepare("UPDATE orchestration_events SET payload_json=? WHERE event_id='native-assistant'").run(JSON.stringify({ ...payload, text: answer.slice(0, 1), streaming: true }));
+      if (options.steered) {
+        for (const [index, text] of ["Steer", "Again"].entries()) {
+          add(`native-steer-${index}`, "thread.message-sent", turn.user.timestamp, "client", {
+            threadId: wrapperId, messageId: `native-steer-${index}`, role: "user", text,
+            attachments: [], turnId: null, streaming: false, createdAt: turn.user.timestamp, updatedAt: turn.user.timestamp,
+          });
+        }
+      }
+      add("native-assistant-delta", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", { ...payload, text: answer.slice(1), streaming: true });
+      add("native-assistant-final", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", { ...payload, text: "", streaming: false });
+    }
     add("native-ready", "thread.session-set", turn.completedAt!, "provider", {
       threadId: wrapperId, session: { threadId: wrapperId, status: "ready", providerName: "codex", providerInstanceId: "codex", activeTurnId: null },
     }, { adapterKey: "codex", providerTurnId: turn.id });
     db.prepare(`INSERT INTO provider_session_runtime (
       thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode,
       status, last_seen_at, resume_cursor_json, runtime_payload_json
-    ) VALUES (?, 'codex', 'codex', 'codex', 'full-access', 'stopped', ?, ?, '{}')`).run(
-      wrapperId, turn.completedAt, JSON.stringify({ threadId: sourceId }),
+    ) VALUES (?, 'codex', 'codex', 'codex', 'full-access', 'stopped', ?, ?, ?)`).run(
+      wrapperId, turn.completedAt, JSON.stringify({ threadId: sourceId }), JSON.stringify(options.scratch ? { cwd: workspace } : {}),
     );
   } finally { db.close(); }
   process.env.T3_IMPORT_DATA_DIR = join(root, "native-ledger");
@@ -432,10 +453,10 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i incremental synchronization", 
       add("native-assistant-3-event", "thread.message-sent", nativeTurn.assistant[0]!.timestamp, {
         threadId: wrapperId, messageId: "native-assistant-message-3", role: "assistant", text: nativeTurn.assistant[0]!.text,
         turnId: nativeTurn.id, streaming: false, createdAt: nativeTurn.assistant[0]!.timestamp, updatedAt: nativeTurn.assistant[0]!.timestamp,
-      }, { adapterKey: "codex", providerTurnId: nativeTurn.id });
+      });
       add("native-ready-3-event", "thread.session-set", nativeTurn.completedAt!, {
         threadId: wrapperId, session: { threadId: wrapperId, status: "ready", providerName: "codex", providerInstanceId: "codex", activeTurnId: null },
-      }, { adapterKey: "codex", providerTurnId: nativeTurn.id });
+      });
     } finally { resumed.close(); }
 
     caughtUp(paths);
@@ -447,6 +468,23 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i incremental synchronization", 
     const repeated = await syncConversations([{ conversation }], paths, { dryRun: false });
     expect(repeated.status).toBe("up-to-date");
     expect(repeated.results[0]).toMatchObject({ status: "up-to-date", threadId: wrapperId, turnsAdded: 0, events: 0 });
+  });
+
+  it("reconstructs streamed native messages from deltas and empty final events", async () => {
+    const { paths, conversation, wrapperId } = await nativeCodexFixture("t3-sync-native-deltas-", { streamed: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1, threadId: wrapperId });
+  });
+
+  it("groups steered inputs only when the native provider turn identity matches", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-steering-", { steered: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1 });
+    conversation.threads[0]!.turns[0]!.id = "different-provider-turn";
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "history-diverged", newTurns: 0 });
+  });
+
+  it("adopts scratch threads only through their exact recorded runtime cwd", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-scratch-", { scratch: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1, titleChanged: false });
   });
 
   it("refuses native Codex adoption when the existing visible transcript diverges", async () => {
