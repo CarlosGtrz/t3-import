@@ -17,6 +17,7 @@ import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
 import { replaceConversations } from "./target/replace.js";
 import { discoverT3CacheProfiles, formatCacheResetResult, resetT3RebuildableCache } from "./target/cache.js";
+import { canonicalPath } from "./core/util.js";
 
 const sourceSchema = z.enum(["codex", "claude"]);
 const program = new Command();
@@ -36,6 +37,29 @@ function parseSince(value?: string): Date | undefined {
   return parsed;
 }
 function sourceName(value: string): SourceName { return sourceSchema.parse(value); }
+
+/**
+ * Options only the non-interactive path honors; falling back to the TUI would silently drop them.
+ * Every new import/sync/replace option the TUI does not receive must be listed here, or it bypasses the routing guard.
+ */
+function nonInteractiveOptions(options: { thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; resume?: boolean }): string[] {
+  return [
+    options.thread.length ? "--thread" : "", options.all ? "--all" : "", options.since !== undefined ? "--since" : "",
+    options.includeIncomplete !== undefined ? "--include-incomplete" : "", options.dryRun ? "--dry-run" : "", options.yes ? "--yes" : "", options.resume === false ? "--no-resume" : "",
+  ].filter(Boolean);
+}
+function canOpenTui(explicit: string[], nonInteractive?: boolean): boolean { return explicit.length === 0 && Boolean(process.stdout.isTTY) && !nonInteractive && !isJson(); }
+function incompleteSelection(command: string, requirement: string, explicit: string[]): ImporterError {
+  if (!explicit.length) return usageError(`Non-interactive ${command} requires --source and ${requirement}.`);
+  return usageError(`${explicit.join(", ")} ${explicit.length === 1 ? "requires" : "require"} a complete selection: pass --source and ${requirement}. ${explicit.length === 1 ? "It is" : "They are"} not available in the interactive TUI.`);
+}
+// A thread id alone selects a conversation; --workspace only narrows discovery and disambiguates ids found in several workspaces.
+function selectConversation(summaries: SourceSummary[], id: string, workspace: string | undefined): SourceSummary {
+  const matches = summaries.filter((item) => item.id === id);
+  if (!matches.length) throw usageError(workspace ? `Conversation not found in workspace: ${id}` : `Conversation not found: ${id}`);
+  if (new Set(matches.map((item) => canonicalPath(item.workspace))).size > 1) throw usageError(`Conversation ${id} exists in several workspaces; pass --workspace to choose one.`);
+  return matches[0]!;
+}
 
 async function confirmImport(count: number): Promise<boolean> {
   const prompt = createInterface({ input, output });
@@ -169,8 +193,9 @@ program.command("import")
   .option("--non-interactive")
   .option("--no-resume")
   .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
-    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
-      if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
+    if (!options.source || (options.thread.length === 0 && !(options.all && options.workspace))) {
+      const explicit = nonInteractiveOptions(options);
+      if (canOpenTui(explicit, options.nonInteractive)) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
         const provider = globalOverrides().providerInstance;
@@ -184,7 +209,7 @@ program.command("import")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("Non-interactive import requires --source, --workspace, and either --thread or --all.");
+      throw incompleteSelection("import", "either --thread or --workspace with --all", explicit);
     }
     if (options.all && options.thread.length) throw usageError("--all and --thread are mutually exclusive.");
     if (!options.dryRun && !options.yes) {
@@ -194,13 +219,10 @@ program.command("import")
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
-    const selected: SourceSummary[] = options.all ? summaries : options.thread.map((id) => {
-      const summary = summaries.find((item) => item.id === id);
-      if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
-      return summary;
-    });
-    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace!, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
+    const workspace = options.workspace ? { workspace: options.workspace } : {};
+    const summaries = await adapter.discover({ ...workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
+    const selected: SourceSummary[] = options.all ? summaries : options.thread.map((id) => selectConversation(summaries, id, options.workspace));
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { ...workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
     const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
@@ -216,8 +238,9 @@ program.command("replace")
   .option("--yes")
   .option("--non-interactive")
   .action(async (options: { source?: string; workspace?: string; thread: string[]; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
-    if (!options.source || !options.workspace || options.thread.length === 0) {
-      if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
+    if (!options.source || options.thread.length === 0) {
+      const explicit = nonInteractiveOptions(options);
+      if (canOpenTui(explicit, options.nonInteractive)) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
         const instance = render(React.createElement(ImportTui, {
@@ -229,19 +252,16 @@ program.command("replace")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("Non-interactive replacement requires --source, --workspace, and --thread.");
+      throw incompleteSelection("replacement", "--thread", explicit);
     }
     if (!options.yes && (!process.stdout.isTTY || options.nonInteractive || isJson())) throw usageError("Non-interactive replacement requires --yes.");
     if (!options.dryRun && !options.yes && !await confirmReplace(options.thread.length)) return;
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
-    const summaries = await adapter.discover({ workspace: options.workspace });
-    const selected = [...new Set(options.thread)].map((id) => {
-      const summary = summaries.find((item) => item.id === id);
-      if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
-      return summary;
-    });
-    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace! }) })));
+    const workspace = options.workspace ? { workspace: options.workspace } : {};
+    const summaries = await adapter.discover(workspace);
+    const selected = [...new Set(options.thread)].map((id) => selectConversation(summaries, id, options.workspace));
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, workspace) })));
     const paths = resolveTargetPaths(globalOverrides());
     const result = await replaceConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "replaced"));
@@ -260,8 +280,9 @@ program.command("sync")
   .option("--yes")
   .option("--non-interactive")
   .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
-    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
-      if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
+    if (!options.source || (options.thread.length === 0 && !(options.all && options.workspace))) {
+      const explicit = nonInteractiveOptions(options);
+      if (canOpenTui(explicit, options.nonInteractive)) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
         const provider = globalOverrides().providerInstance;
@@ -275,7 +296,7 @@ program.command("sync")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("Non-interactive sync requires --source, --workspace, and either --thread or --all.");
+      throw incompleteSelection("sync", "either --thread or --workspace with --all", explicit);
     }
     if (options.all && options.thread.length) throw usageError("--all and --thread are mutually exclusive.");
     if (!options.yes && (!process.stdout.isTTY || options.nonInteractive || isJson())) {
@@ -287,14 +308,11 @@ program.command("sync")
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}) });
-    const selected = options.all ? summaries : options.thread.map((id) => {
-      const summary = summaries.find((item) => item.id === id);
-      if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
-      return summary;
-    });
+    const workspace = options.workspace ? { workspace: options.workspace } : {};
+    const summaries = await adapter.discover({ ...workspace, ...(since ? { since } : {}) });
+    const selected = options.all ? summaries : options.thread.map((id) => selectConversation(summaries, id, options.workspace));
     const paths = resolveTargetPaths(globalOverrides());
-    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace! }) })));
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, workspace) })));
     const eligible = options.all
       ? (await Promise.all(loaded.map(async (selection) => ({ selection, preview: await inspectConversationSync(selection.conversation, paths) })))).filter((item) => item.preview.previouslyImported).map((item) => item.selection)
       : loaded;
