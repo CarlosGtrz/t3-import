@@ -39,6 +39,7 @@ Non-interactive examples:
 ```text
 t3-import list --source codex --workspace C:\src\my-project
 t3-import show --source claude --thread <session-id>
+t3-import import --source claude --thread <session-id> --dry-run
 t3-import import --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
 t3-import import --source claude --workspace C:\src\my-project --all --since 2026-01-01 --yes --non-interactive
 t3-import sync --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
@@ -94,6 +95,8 @@ Replace options:
 ```
 
 The normal TUI labels conversations as new, syncable, up to date, active-only, or conflicted. Interrupted and failed additions are called out in the status text, and ignored active turns are shown without enabling them for synchronization. A history conflict is labeled `history changed · replace available` when it can be replaced. Replacement choices cannot be mixed with imports or ordinary syncs. The dedicated `sync` and `replace` commands open focused TUI flows when required arguments are omitted on a terminal.
+
+`--workspace` is optional with `--thread` (it is only needed when the same id exists in several workspaces) and required with `--all`. On a terminal, an incomplete selection opens the TUI only when none of `--thread`, `--all`, `--since`, `--include-incomplete`, `--dry-run`, `--yes`, or `--no-resume` is given, because the TUI does not support them; otherwise the command exits with a usage error instead of discarding those options.
 
 When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` live-T3 safety, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
 
