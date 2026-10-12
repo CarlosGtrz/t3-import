@@ -29,6 +29,19 @@ Type checking and build passed. All 618 tests in 11 files passed. The focused sy
 
 Global sync tests cover linked conversations across workspaces, an unrelated source, unavailable sources, divergent histories, safe updates in a mixed batch, backups, and repeat synchronization. Ledger tests check that preview reads do not create or migrate the ledger.
 
+## Review follow-up on ledger safety
+
+On 12 October 2026, regression coverage was added in response to the review on PR #6:
+
+- Read committed, uncheckpointed WAL rows while the writer connection remains open. Check that the database and WAL bytes do not change.
+- Read a consistent database/WAL copy with no `-shm` file. Check that pending WAL data remains visible and persistent bytes stay unchanged.
+- Run both sync and replacement dry-run engines, plus the inspection functions used by the TUI conversation views, against missing and legacy ledgers. Check that no ledger directory is created, the legacy ledger files remain unchanged, no target events are added, and no backup is created. These tests call the TUI's inspection functions directly rather than rendering the interactive UI.
+- Exercise real `SQLITE_NOTADB` and `SQLITE_CORRUPT` failures through ledger reads, inspection, and both dry-run engines. Check that the importer returns a safety error with the ledger path and recovery guidance, while preserving existing persistent data.
+
+The focused ledger suites passed 8 tests. The full suite passed 624 tests across 12 files. Type checking, build, and `git diff --check` passed.
+
+Read-only refers to the database data and schema. SQLite may create or rebuild `-shm`; on a WAL-mode corrupt database it may also create an empty WAL before detecting the corruption. The tests do not promise an unchanged shared-memory index. The reader deliberately avoids immutable mode so it can see committed WAL transactions. Corruption errors do not attempt repairs and ask the user to preserve the database and sidecars before restoring a verified ledger backup.
+
 ## Database copy experiment
 
 A consistent SQLite backup of the target and a separate copy of the import ledger were used. The ledger target was remapped only in the copy. Source loading used local rollouts without launching the Codex app-server.

@@ -3,6 +3,7 @@ import envPaths from "env-paths";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseCheckpoint, type ImportCheckpoint } from "../core/checkpoint.js";
+import { safetyError } from "../core/errors.js";
 
 export interface LedgerRecord {
   targetId: string;
@@ -214,13 +215,22 @@ export function listImports(targetId: string, source?: string): StoredLedgerReco
   if (!existsSync(path)) return [];
   // Previewing must neither create the ledger nor migrate its schema.
   // Missing legacy columns are handled by decodeRow; writes migrate as needed.
-  const db = new Database(path, { readonly: true, fileMustExist: true });
+  let db: Database.Database | undefined;
   try {
+    // Do not use immutable mode: it would ignore committed transactions in WAL.
+    // SQLite may maintain its rebuildable shared-memory index even for readers.
+    db = new Database(path, { readonly: true, fileMustExist: true });
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='imports'").get()) return [];
     const rows = db.prepare(`
       SELECT * FROM imports WHERE target_id = ? ${source ? "AND source = ?" : ""}
       ORDER BY imported_at DESC
     `).all(...(source ? [targetId, source] : [targetId])) as RawLedgerRow[];
     return rows.map(decodeRow);
-  } finally { db.close(); }
+  } catch (error) {
+    if (error instanceof Error && "code" in error &&
+        (error.code === "SQLITE_CORRUPT" || error.code === "SQLITE_NOTADB")) {
+      throw safetyError(`Cannot read import ledger at ${path}: SQLite reports ${error.code}. Preserve the ledger and any -wal/-shm files, then restore a verified ledger backup before retrying. No ledger repair was attempted.`);
+    }
+    throw error;
+  } finally { db?.close(); }
 }
