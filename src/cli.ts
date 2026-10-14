@@ -9,6 +9,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { z } from "zod";
 import { ImportTui } from "./tui.js";
 import { ImporterError, usageError } from "./core/errors.js";
+import { validateDestinationOptions } from "./target/destination.js";
 import type { ImportRunResult, ReplaceRunResult, SourceName, SourceSummary, SyncRunResult } from "./core/types.js";
 import { disposeSourceAdapters, sourceAdapter } from "./sources/index.js";
 import { resolveTargetPaths, type TargetOverrides } from "./target/config.js";
@@ -173,6 +174,8 @@ program.command("import")
   .description("Import selected conversations")
   .addOption(new Option("--source <source>", "codex or claude"))
   .option("--workspace <path>")
+  .option("--target-project <id>", "existing T3 project ID; its root must match the source cwd")
+  .option("--no-project", "use native No project for a source cwd already inside T3 scratch")
   .option("--thread <id>", "source conversation id (repeatable)", collect, [])
   .option("--all", "select every matching conversation")
   .option("--since <date>", "ISO date/time")
@@ -181,7 +184,9 @@ program.command("import")
   .option("--yes")
   .option("--non-interactive")
   .option("--no-resume")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+  .action(async (options: { source?: string; workspace?: string; targetProject?: string; noProject?: boolean; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+    validateDestinationOptions(options);
+    if ((options.targetProject || options.noProject) && (!options.source || !options.workspace || (!options.all && !options.thread.length))) throw usageError("Destination selection requires --source, --workspace, and --thread or --all; it is not available through the TUI yet.");
     if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -215,7 +220,7 @@ program.command("import")
     });
     const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace!, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
-    const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
+    const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume, ...(options.targetProject ? { targetProject: options.targetProject } : {}), ...(options.noProject ? { noProject: true } : {}) });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
     print(result);
   });

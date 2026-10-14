@@ -58,6 +58,16 @@ After reopening T3, the user confirmed that the conversation appeared synchroniz
 
 ## Limits and transcript artifacts
 
+### Explicit import destination checks
+
+The destination options preserve the source execution directory. `--target-project` accepts only an existing project rooted at that cwd. `--no-project` accepts only an existing direct child of the target home's native scratch directory, outside Git. External folders, escaped symlinks, missing/deleted projects, and conflicting flags fail before writes. These options select destinations for new imports; they do not move an already imported thread or relocate source files.
+
+Scratch threads retain their folder in `thread.created.worktreePath`, rather than relying on runtime payload `cwd` to override T3's workspace policy. Replacement retains that field, and repeat import reports the existing destination. Tests cover these paths across migrations 40–54, including dry-run persistence, repeat import, sync, replacement, and cwd agreement.
+
+The implementation was checked against upstream `RuntimePolicy.ts`, `ThreadLaunchService.ts`, `ManagedProjectFolders.ts`, and the native scratch launch tests. No GUI claim is made for the new destination options; their event and runtime invariants are covered by fixtures.
+
+Destination tests passed 34 cases; together with CLI checks, the focused run passed 37 tests. The full run passed 658 tests across 13 files, plus type checking, build, and diff checks. Additional cases verify canonical project-event fallback before projection materialization, refusal to move an existing import to another destination, and preservation of path spelling while canonical paths are used only for comparison.
+
 This is an explicit one-shot sync. T3 must be closed for writes and reopened to rebuild projections. Active source turns wait until they reach a terminal state.
 
 Exit code 7 means some linked conversations need review. Safe updates can succeed in the same batch, producing a `mixed` result. Divergent or ambiguous histories and unavailable rollouts remain untouched. The implementation does not merge branches, replace conversations, or create separate branch copies automatically.

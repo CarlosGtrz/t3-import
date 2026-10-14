@@ -121,6 +121,8 @@ export interface ImportItemResult {
   status: "imported" | "already-imported" | "dry-run";
   threadId: string;
   projectId: string;
+  sourceWorkspace?: string;
+  workingDirectory?: string;
   title: string;
   turns: number;
   messages: number;

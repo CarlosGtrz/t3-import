@@ -28,7 +28,11 @@ t3-import
 
 Running without a command opens the interactive TUI. It guides you through source, workspace, provider instance, conversation selection, review, confirmation, and results, then offers to start T3 Code with Yes selected by default.
 
-For non-interactive `import`, `--workspace` is required and filters source discovery. The destination project is determined by the selected conversation's recorded workspace: the importer reuses a matching T3 project or creates one named after that directory. It does not clone or move the source repository. There is currently no independent destination-project option or import into T3's "No project" scratch area. Omitting `--workspace` does not select that area.
+For non-interactive `import`, `--workspace` is required and filters source discovery. By default, the destination project is determined by the selected conversation's recorded workspace: the importer reuses a matching T3 project or creates one named after that directory. It does not clone or move the source repository. Omitting `--workspace` does not select T3's "No project" area.
+
+To choose a destination explicitly, pass `--target-project <project-id>` for an existing, non-deleted T3 project. Its root must match the source cwd; otherwise the importer refuses rather than silently changing where resumed work runs. Project IDs can be inspected in the target database with a read-only query such as `SELECT project_id, title, workspace_root FROM projection_projects WHERE deleted_at IS NULL`.
+
+`--no-project` uses T3's native scratch project and keeps the source folder as the thread's `worktreePath`. It requires the source cwd to be an existing direct child of `<t3-home>/scratch`, outside Git checkouts. It refuses external folders and symlinks escaping that layout. It does not move or copy files, create a replacement source folder, or reinterpret an arbitrary directory as managed scratch. The two destination options are mutually exclusive and currently available only through the non-interactive CLI. Preview results include `sourceWorkspace` and `workingDirectory`. Re-importing does not move an existing thread; sync and replacement retain its destination.
 
 ## Interactive demo
 
@@ -84,6 +88,8 @@ Import options:
 --yes
 --non-interactive
 --no-resume
+--target-project <id>     Existing T3 project with a root matching source cwd
+--no-project              Native scratch destination, only for an existing scratch source cwd
 ```
 
 Sync options:
