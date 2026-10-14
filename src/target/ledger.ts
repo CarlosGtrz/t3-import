@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import envPaths from "env-paths";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseCheckpoint, type ImportCheckpoint } from "../core/checkpoint.js";
+import { safetyError } from "../core/errors.js";
 
 export interface LedgerRecord {
   targetId: string;
@@ -36,8 +37,12 @@ export interface StoredLedgerRecord extends Omit<LedgerRecord, "checkpoint" | "i
   isCanonical?: boolean;
 }
 
+function ledgerDirectory(): string {
+  return process.env.T3_IMPORT_DATA_DIR?.trim() || envPaths("t3-import").data;
+}
+
 function openLedger(): Database.Database {
-  const directory = process.env.T3_IMPORT_DATA_DIR?.trim() || envPaths("t3-import").data;
+  const directory = ledgerDirectory();
   mkdirSync(directory, { recursive: true });
   const db = new Database(join(directory, "ledger.sqlite"));
   db.pragma("journal_mode = WAL");
@@ -160,7 +165,7 @@ function decodeRow(row: RawLedgerRow): StoredLedgerRecord {
     sourceTitle: row.source_title ?? "",
     ...(checkpoint ? { checkpoint } : {}),
     ...(row.synced_at ? { syncedAt: row.synced_at } : {}),
-    ...(row.is_canonical === null ? {} : { isCanonical: row.is_canonical === 1 }),
+    ...(row.is_canonical == null ? {} : { isCanonical: row.is_canonical === 1 }),
     ...(row.superseded_by_thread_id ? { supersededByThreadId: row.superseded_by_thread_id } : {}),
     ...(row.replaced_at ? { replacedAt: row.replaced_at } : {}),
   };
@@ -206,12 +211,26 @@ export function recordConsolidation(oldRecords: StoredLedgerRecord[], newRecord:
 }
 
 export function listImports(targetId: string, source?: string): StoredLedgerRecord[] {
-  const db = openLedger();
+  const path = join(ledgerDirectory(), "ledger.sqlite");
+  if (!existsSync(path)) return [];
+  // Previewing must neither create the ledger nor migrate its schema.
+  // Missing legacy columns are handled by decodeRow; writes migrate as needed.
+  let db: Database.Database | undefined;
   try {
+    // Do not use immutable mode: it would ignore committed transactions in WAL.
+    // SQLite may maintain its rebuildable shared-memory index even for readers.
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='imports'").get()) return [];
     const rows = db.prepare(`
       SELECT * FROM imports WHERE target_id = ? ${source ? "AND source = ?" : ""}
       ORDER BY imported_at DESC
     `).all(...(source ? [targetId, source] : [targetId])) as RawLedgerRow[];
     return rows.map(decodeRow);
-  } finally { db.close(); }
+  } catch (error) {
+    if (error instanceof Error && "code" in error &&
+        (error.code === "SQLITE_CORRUPT" || error.code === "SQLITE_NOTADB")) {
+      throw safetyError(`Cannot read import ledger at ${path}: SQLite reports ${error.code}. Preserve the ledger and any -wal/-shm files. Automatic T3 backups do not include this external ledger. If you have a verified user-maintained ledger backup, restore it before retrying; otherwise investigate recovery before further writes. Do not delete the ledger: it may contain replacement history. No ledger repair was attempted.`);
+    }
+    throw error;
+  } finally { db?.close(); }
 }

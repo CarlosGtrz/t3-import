@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("external ledger migration", () => {
-  it("adds checkpoint columns to a 0.1 ledger in place", async () => {
+  it("reads a 0.1 ledger without migrating it during preview", async () => {
     const directory = await mkdtemp(join(tmpdir(), "t3-ledger-v1-"));
     process.env.T3_IMPORT_DATA_DIR = directory;
     mkdirSync(directory, { recursive: true });
@@ -38,6 +38,15 @@ describe("external ledger migration", () => {
     const migrated = new Database(join(directory, "ledger.sqlite"), { readonly: true });
     const columns = (migrated.prepare("PRAGMA table_info(imports)").all() as Array<{ name: string }>).map((row) => row.name);
     migrated.close();
-    expect(columns).toEqual(expect.arrayContaining(["identity_seed", "checkpoint_json", "source_title", "synced_at", "is_canonical", "superseded_by_thread_id", "replaced_at"]));
+    expect(columns).not.toContain("identity_seed");
+    expect(columns).not.toContain("checkpoint_json");
+    expect(rows[0]!.isCanonical).toBeUndefined();
+  });
+
+  it("does not create a ledger directory when inspecting an unimported target", async () => {
+    const directory = join(await mkdtemp(join(tmpdir(), "t3-ledger-readonly-")), "absent");
+    process.env.T3_IMPORT_DATA_DIR = directory;
+    expect(listImports("target", "codex")).toEqual([]);
+    expect(existsSync(directory)).toBe(false);
   });
 });

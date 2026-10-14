@@ -9,12 +9,14 @@ import { stdin as input, stdout as output } from "node:process";
 import { z } from "zod";
 import { ImportTui } from "./tui.js";
 import { ImporterError, usageError } from "./core/errors.js";
+import { validateDestinationOptions } from "./target/destination.js";
 import type { ImportRunResult, ReplaceRunResult, SourceName, SourceSummary, SyncRunResult } from "./core/types.js";
 import { disposeSourceAdapters, sourceAdapter } from "./sources/index.js";
 import { resolveTargetPaths, type TargetOverrides } from "./target/config.js";
 import { IMPORTER_VERSION, importConversations } from "./target/importer.js";
 import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
+import { syncAllLinkedConversations } from "./target/syncAll.js";
 import { replaceConversations } from "./target/replace.js";
 import { discoverT3CacheProfiles, formatCacheResetResult, resetT3RebuildableCache } from "./target/cache.js";
 
@@ -29,6 +31,18 @@ function globalOverrides(): TargetOverrides {
 function isJson(): boolean { return Boolean(program.opts<{ json?: boolean }>().json); }
 function shouldResetCache(): boolean { return program.opts<{ cacheReset?: boolean }>().cacheReset !== false; }
 function print(value: unknown): void { console.log(isJson() ? JSON.stringify(value) : typeof value === "string" ? value : JSON.stringify(value, null, 2)); }
+function printSync(result: SyncRunResult, summary?: boolean): void {
+  if (!summary || isJson()) { print(result); return; }
+  const updated = result.results.filter((item) => item.status === "synced" || item.status === "dry-run");
+  const current = result.results.filter((item) => item.status === "up-to-date");
+  const skipped = result.results.filter((item) => !updated.includes(item) && !current.includes(item));
+  const turns = updated.reduce((sum, item) => sum + item.turnsAdded, 0);
+  console.log(`${result.status}: ${turns} new turns; ${current.length} current threads; ${skipped.length} skipped.`);
+  for (const item of [...updated, ...skipped]) console.log(`${item.status}\t${item.title}${item.turnsAdded ? ` (+${item.turnsAdded} turns)` : ""}`);
+  if (result.backup) console.log(`Backup: ${result.backup}`);
+  for (const warning of result.warnings) console.log(`Warning: ${warning}`);
+  if (skipped.length) console.log("Skipped histories were preserved. Exit code 7 means some linked threads need review.");
+}
 function parseSince(value?: string): Date | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
@@ -160,6 +174,8 @@ program.command("import")
   .description("Import selected conversations")
   .addOption(new Option("--source <source>", "codex or claude"))
   .option("--workspace <path>")
+  .option("--target-project <id>", "existing T3 project ID; its root must match the source cwd")
+  .option("--no-project", "use native No project for a source cwd already inside T3 scratch")
   .option("--thread <id>", "source conversation id (repeatable)", collect, [])
   .option("--all", "select every matching conversation")
   .option("--since <date>", "ISO date/time")
@@ -168,7 +184,9 @@ program.command("import")
   .option("--yes")
   .option("--non-interactive")
   .option("--no-resume")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+  .action(async (options: { source?: string; workspace?: string; targetProject?: string; noProject?: boolean; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+    validateDestinationOptions(options);
+    if ((options.targetProject || options.noProject) && (!options.source || !options.workspace || (!options.all && !options.thread.length))) throw usageError("Destination selection requires --source, --workspace, and --thread or --all; it is not available through the TUI yet.");
     if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -202,7 +220,7 @@ program.command("import")
     });
     const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace!, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
-    const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
+    const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume, ...(options.targetProject ? { targetProject: options.targetProject } : {}), ...(options.noProject ? { noProject: true } : {}) });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
     print(result);
   });
@@ -250,17 +268,18 @@ program.command("replace")
   });
 
 program.command("sync")
-  .description("Append new completed, interrupted, or failed turns to previously imported conversations")
+  .description("Append new turns to imported tasks and safely adopt matching native Codex threads")
   .addOption(new Option("--source <source>", "codex or claude"))
   .option("--workspace <path>")
   .option("--thread <id>", "source conversation id (repeatable)", collect, [])
-  .option("--all", "synchronize every previously imported matching conversation")
+  .option("--all", "synchronize linked tasks; omit --workspace to scan all Codex projects")
   .option("--since <date>", "ISO date/time")
   .option("--dry-run")
   .option("--yes")
   .option("--non-interactive")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
-    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
+  .option("--summary", "print a compact synchronization report")
+  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; summary?: boolean }) => {
+    if (!options.source || (!options.workspace && !options.all) || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
@@ -275,7 +294,7 @@ program.command("sync")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("Non-interactive sync requires --source, --workspace, and either --thread or --all.");
+      throw usageError("Non-interactive sync requires --source and either --all or --workspace with --thread.");
     }
     if (options.all && options.thread.length) throw usageError("--all and --thread are mutually exclusive.");
     if (!options.yes && (!process.stdout.isTTY || options.nonInteractive || isJson())) {
@@ -286,8 +305,17 @@ program.command("sync")
     }
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
+    if (options.all && !options.workspace) {
+      if (options.since) throw usageError("--since requires --workspace when synchronizing; a global sync checks every linked conversation.");
+      const paths = resolveTargetPaths(globalOverrides());
+      const result = await syncAllLinkedConversations(adapter, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
+      await attachCacheReset(result, paths, result.results.some((item) => item.status === "synced"));
+      printSync(result, options.summary);
+      if (result.hasConflicts) process.exitCode = 7;
+      return;
+    }
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}) });
+    const summaries = await adapter.discover({ workspace: options.workspace!, ...(since ? { since } : {}) });
     const selected = options.all ? summaries : options.thread.map((id) => {
       const summary = summaries.find((item) => item.id === id);
       if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
@@ -300,7 +328,7 @@ program.command("sync")
       : loaded;
     const result = await syncConversations(eligible, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "synced"));
-    print(result);
+    printSync(result, options.summary);
     if (result.hasConflicts) process.exitCode = 7;
   });
 

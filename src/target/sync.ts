@@ -118,7 +118,76 @@ function canonicalMarker(seed: string): string {
   return deterministicUuid(`t3-import:event:${seed}:thread.created`);
 }
 
+const NATIVE_CODEX_SEED_PREFIX = "t3-import:native-codex:";
+
+function nativeCodexRecord(
+  db: Database.Database,
+  paths: TargetPaths,
+  thread: CanonicalThread,
+): StoredLedgerRecord | undefined {
+  const candidates = db.prepare(`
+    SELECT thread_id threadId, resume_cursor_json cursor, runtime_payload_json runtime, status
+    FROM provider_session_runtime
+    WHERE provider_name = 'codex' AND adapter_key = 'codex'
+  `).all() as Array<{ threadId: string; cursor: string | null; runtime: string | null; status: string }>;
+  const matches = candidates.filter((candidate) => {
+    if (candidate.threadId === thread.sourceSessionId || candidate.status !== "stopped") return false;
+    try {
+      const cursor = candidate.cursor ? JSON.parse(candidate.cursor) as Record<string, unknown> : {};
+      return stringValue(cursor.threadId) === thread.sourceSessionId;
+    } catch { return false; }
+  });
+  if (matches.length !== 1) return undefined;
+  const threadId = matches[0]!.threadId;
+  const events = readEvents(db, threadId);
+  const created = createEvent(events);
+  if (!created || events.some((row) => row.type === "thread.deleted")) return undefined;
+  const projectId = stringValue(created.payload.projectId);
+  if (!projectId) return undefined;
+  const project = db.prepare(`
+    SELECT payload_json payload FROM orchestration_events
+    WHERE aggregate_kind = 'project' AND stream_id = ? AND event_type = 'project.created'
+    ORDER BY sequence LIMIT 1
+  `).get(projectId) as { payload: string } | undefined;
+  if (!project) return undefined;
+  try {
+    const root = stringValue((JSON.parse(project.payload) as Record<string, unknown>).workspaceRoot);
+    const runtime = matches[0]!.runtime ? JSON.parse(matches[0]!.runtime!) as unknown : undefined;
+    const cwd = isObject(runtime) ? stringValue(runtime.cwd) : undefined;
+    // Scratch threads run in a per-thread directory below the T3 project root.
+    // Accept only an exact recorded runtime cwd, never an ancestor/path guess.
+    if (!root || (canonicalPath(root) !== canonicalPath(thread.workspace)
+      && (!cwd || canonicalPath(cwd) !== canonicalPath(thread.workspace)))) return undefined;
+  } catch { return undefined; }
+  const identitySeed = `${NATIVE_CODEX_SEED_PREFIX}${thread.sourceSessionId}:${threadId}`;
+  return {
+    targetId: targetId(paths), source: "codex", sourceSessionId: thread.sourceSessionId,
+    sourceKey: thread.sourceKey, sourceFingerprint: "", projectId, threadId,
+    importedAt: stringValue(created.payload.createdAt) ?? thread.createdAt,
+    importerVersion: "native-adoption", migration: targetMigration(db),
+    firstSequence: created.sequence, lastSequence: events.at(-1)?.sequence ?? created.sequence,
+    resumable: true, backupPath: "", warnings: [], identitySeed,
+    currentSourceKey: thread.sourceKey,
+    sourceTitle: thread.title,
+    isCanonical: true,
+  };
+}
+
 export function validRecord(db: Database.Database, record: StoredLedgerRecord): boolean {
+  if (record.identitySeed.startsWith(NATIVE_CODEX_SEED_PREFIX)) {
+    const runtime = db.prepare(`
+      SELECT resume_cursor_json cursor FROM provider_session_runtime
+      WHERE thread_id = ? AND provider_name = 'codex' AND adapter_key = 'codex'
+    `).get(record.threadId) as { cursor: string | null } | undefined;
+    if (!runtime) return false;
+    try {
+      const cursor = runtime.cursor ? JSON.parse(runtime.cursor) as Record<string, unknown> : {};
+      const events = readEvents(db, record.threadId);
+      return stringValue(cursor.threadId) === record.sourceSessionId
+        && Boolean(createEvent(events))
+        && !events.some((row) => row.type === "thread.deleted");
+    } catch { return false; }
+  }
   return Boolean(db.prepare(`
     SELECT 1 found FROM orchestration_events
     WHERE stream_id = ? AND event_type = 'thread.created' AND event_id = ? LIMIT 1
@@ -156,7 +225,7 @@ export function fallbackRecord(db: Database.Database, paths: TargetPaths, thread
     .map((candidate) => ({ candidate, created: events.find((row) => row.eventId === canonicalMarker(candidate)) }))
     .find((candidate) => candidate.created);
   const created = matched?.created;
-  if (!created) return undefined;
+  if (!created) return thread.source === "codex" ? nativeCodexRecord(db, paths, thread) : undefined;
   seed = matched!.candidate;
   const projectId = stringValue(created.payload.projectId);
   if (!projectId) return undefined;
@@ -325,6 +394,115 @@ function eventAttachments(row: EventRow | undefined): Array<{ name: string; mime
   return attachments.length === row.payload.attachments.length ? attachments : undefined;
 }
 
+interface NativeVisibleTurn {
+  user: EventRow;
+  assistant: EventRow[];
+  status?: CanonicalTerminalTurnStatus;
+  providerTurnId?: string;
+}
+
+function nativeCodexPrefixLength(thread: CanonicalThread, events: EventRow[]): number | undefined {
+  const turns: NativeVisibleTurn[] = [];
+  const messages = new Map<string, EventRow>();
+  let active: NativeVisibleTurn | undefined;
+  for (const row of events) {
+    if (row.type === "thread.message-sent") {
+      const role = stringValue(row.payload.role);
+      if (role === "user") {
+        if (active) turns.push(active);
+        active = { user: row, assistant: [] };
+      } else if (role === "assistant") {
+        if (!active) return undefined;
+        // Match T3's message projector: streaming events append deltas;
+        // a non-empty final event replaces the accumulated text, while an
+        // empty final event retains it.
+        const messageId = stringValue(row.payload.messageId);
+        const providerTurnId = stringValue(row.payload.turnId) ?? stringValue(row.metadata.providerTurnId);
+        if (providerTurnId) {
+          if (active.providerTurnId && active.providerTurnId !== providerTurnId) return undefined;
+          active.providerTurnId = providerTurnId;
+        }
+        const existingIndex = messageId
+          ? active.assistant.findIndex((message) => stringValue(message.payload.messageId) === messageId)
+          : -1;
+        const previous = messageId ? messages.get(messageId) : undefined;
+        const text = stringValue(row.payload.text) ?? "";
+        const previousText = stringValue(previous?.payload.text) ?? "";
+        const merged: EventRow = {
+          ...row,
+          payload: { ...row.payload, text: row.payload.streaming === true ? previousText + text : text || previousText },
+        };
+        // One assistant message can span multiple steered user inputs.
+        // All those turn fragments share the same accumulated snapshot.
+        if (previous) Object.assign(previous, merged);
+        const snapshot = previous ?? merged;
+        if (messageId) messages.set(messageId, snapshot);
+        if (existingIndex >= 0) active.assistant[existingIndex] = snapshot;
+        else active.assistant.push(snapshot);
+      }
+    } else if (row.type === "thread.session-set" && active?.assistant.length && !active.status) {
+      const status = terminalStatusFromEvent(row);
+      if (status) active.status = status;
+    }
+  }
+  if (active) turns.push(active);
+  if (turns.length === 0) return undefined;
+
+  // T3 stores each steered input as a user message. Codex stores all inputs
+  // handled by one provider turn together. Merge only with an explicit shared
+  // provider turn ID, allowing a user-only fragment between matching IDs.
+  const grouped: NativeVisibleTurn[] = [];
+  for (const [index, turn] of turns.entries()) {
+    const previous = grouped.at(-1);
+    const bridge = !turn.providerTurnId && !turn.status && turn.assistant.length === 0
+      && previous?.providerTurnId === turns[index + 1]?.providerTurnId;
+    if (previous?.providerTurnId && !previous.status
+      && (previous.providerTurnId === turn.providerTurnId || bridge)) {
+      const previousAttachments = eventAttachments(previous.user);
+      const nextAttachments = eventAttachments(turn.user);
+      if (!previousAttachments || !nextAttachments) return undefined;
+      previous.user = {
+        ...previous.user,
+        payload: {
+          ...previous.user.payload,
+          text: `${stringValue(previous.user.payload.text) ?? ""}\n\n${stringValue(turn.user.payload.text) ?? ""}`,
+          attachments: [...previousAttachments, ...nextAttachments],
+        },
+      };
+      previous.assistant = [...new Set([...previous.assistant, ...turn.assistant])];
+      if (turn.status) previous.status = turn.status;
+    } else grouped.push(turn);
+  }
+  if (grouped.length > thread.turns.length) return undefined;
+
+  for (const [index, native] of grouped.entries()) {
+    const source = thread.turns[index];
+    const nativeUser = stringValue(native.user.payload.text);
+    const sourceUser = source?.user.text ?? "";
+    // A resumed Codex rollout may start with a context envelope before the
+    // original T3 prompt. Accept that only when the visible prompt is its exact
+    // final segment; all later turns must match byte-for-byte.
+    const userMatches = sourceUser === nativeUser
+      || (index === 0 && sourceUser.endsWith(`\n\n${nativeUser}`));
+    const actualAttachments = eventAttachments(native.user);
+    const expectedAttachments = source ? sourceAttachments(source) : [];
+    const actualAssistant = native.assistant.map((row) => stringValue(row.payload.text) ?? "");
+    const expectedAssistant = source?.assistant.map((message) => message.text) ?? [];
+    if (!source || (native.providerTurnId && native.providerTurnId !== source.id) || !userMatches || actualAttachments === undefined
+      || JSON.stringify(actualAttachments) !== JSON.stringify(expectedAttachments)
+      || JSON.stringify(actualAssistant) !== JSON.stringify(expectedAssistant)
+      || native.status !== source.status) return undefined;
+  }
+  return grouped.length;
+}
+
+function nativeCodexAdoptedTurns(thread: CanonicalThread, start: number, events: EventRow[], afterSequence: number): number {
+  const suffix = events.filter((row) => row.sequence > afterSequence);
+  if (!suffix.some((row) => row.type === "thread.message-sent"
+    && (row.payload.role === "user" || row.payload.role === "assistant"))) return 0;
+  return nativeCodexPrefixLength({ ...thread, turns: thread.turns.slice(start) }, suffix) ?? -1;
+}
+
 function claudeAdoptedTurns(thread: CanonicalThread, start: number, events: EventRow[], afterSequence: number): number {
   const messages = events.filter((row) => row.sequence > afterSequence && row.type === "thread.message-sent" && (row.payload.role === "user" || row.payload.role === "assistant"));
   let cursor = 0;
@@ -372,13 +550,18 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   if (thread.source === "claude" && conversation.summary.branches !== 1) {
     return { conversation, thread, record, result: conflictResult(thread, "branch-sync-unsupported", "Claude synchronization currently requires exactly one non-sidechain leaf.", record), titleEvent: false, previouslyImported: true };
   }
+  const nativeAdoption = record.identitySeed.startsWith(NATIVE_CODEX_SEED_PREFIX);
   const bootstrapped = record.checkpoint ? undefined : bootstrapCheckpoint(thread, record, events);
   const checkpoint = record.checkpoint ?? bootstrapped?.checkpoint;
-  const sourcePrefixLength = checkpoint ? verifiedSourcePrefixLength(thread, checkpoint) : undefined;
-  if (!checkpoint || sourcePrefixLength === undefined) {
+  const sourcePrefixLength = checkpoint
+    ? verifiedSourcePrefixLength(thread, checkpoint)
+    : nativeAdoption ? nativeCodexPrefixLength(thread, events) : undefined;
+  if (sourcePrefixLength === undefined || (!checkpoint && !nativeAdoption)) {
     return { conversation, thread, record, result: conflictResult(thread, "history-diverged", "Previously imported history is no longer an unchanged source prefix.", record), titleEvent: false, previouslyImported: true };
   }
-  const adopted = thread.source === "codex"
+  const adopted = nativeAdoption
+    ? checkpoint ? nativeCodexAdoptedTurns(thread, sourcePrefixLength, events, record.lastSequence) : 0
+    : thread.source === "codex"
     ? codexAdoptedTurns(thread, sourcePrefixLength, events, bootstrapped?.lastSequence ?? record.lastSequence)
     : claudeAdoptedTurns(thread, sourcePrefixLength, events, bootstrapped?.lastSequence ?? record.lastSequence);
   if (adopted < 0) return { conversation, thread, record, result: conflictResult(thread, "history-diverged", "T3 contains an ambiguous or partial provider turn suffix.", record), titleEvent: false, previouslyImported: true };
@@ -396,7 +579,9 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
   }
   const provider = existingProvider(db, thread, record, events);
   const syncThread = { ...thread, turns: newTurns, warnings };
-  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, checkpoint.turns.length + adopted, false);
+  const turnOffset = nativeAdoption ? sourcePrefixLength : (checkpoint?.turns.length ?? sourcePrefixLength) + adopted;
+  const planned = planThread(syncThread, record.threadId, record.projectId, paths, provider, record.identitySeed, undefined, record.resumable && Boolean(thread.resumeCursor), conversation.fingerprint, turnOffset, false);
+  if (nativeAdoption) markAsHistoricalTranscript(planned);
   if (titleAction === "updated") {
     planned.events.push(event(
       record.identitySeed, `sync.title.${events.filter((row) => row.type === "thread.meta-updated").length}`, "thread", record.threadId,
@@ -422,6 +607,35 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
 
 function hasConflict(status: SyncItemResult["status"]): boolean {
   return ["history-diverged", "branch-sync-unsupported", "target-missing", "not-imported"].includes(status);
+}
+
+/**
+ * Native Codex wrappers already exist in T3, so newly discovered Codex turns
+ * are transcript history. Emit them with T3's history-import semantics rather
+ * than replaying them as live provider turns; a turn-start request would ask
+ * the provider to execute historical work again.
+ */
+function markAsHistoricalTranscript(planned: PlannedThread): void {
+  planned.events = planned.events
+    .filter((row) => row.type !== "thread.turn-start-requested" && row.type !== "thread.session-set")
+    .map((row) => {
+      if (row.type === "thread.message-sent") {
+        return {
+          ...row,
+          payload: { ...row.payload, turnId: null },
+          metadata: { ...row.metadata, historyImport: true },
+        };
+      }
+      if (row.type === "thread.activity-appended") {
+        const activity = row.payload.activity as Record<string, unknown>;
+        return {
+          ...row,
+          payload: { ...row.payload, activity: { ...activity, turnId: null } },
+          metadata: { ...row.metadata, historyImport: true },
+        };
+      }
+      return row;
+    });
 }
 
 function aggregate(results: SyncItemResult[], dryRun: boolean): SyncRunResult["status"] {

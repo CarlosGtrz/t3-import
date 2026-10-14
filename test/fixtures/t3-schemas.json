@@ -4018,5 +4018,332 @@
         "name": "PullRequestFilesViewed"
       }
     ]
+  },
+  "54": {
+    "commit": "451afcb22d93f06cb24f9bc16703404564952553",
+    "ddl": [
+      "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      label TEXT,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    , proof_key_thumbprint TEXT)",
+      "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    , client_surface TEXT, client_app_version TEXT)",
+      "CREATE TABLE checkpoint_diff_blobs (\n      thread_id TEXT NOT NULL,\n      from_turn_count INTEGER NOT NULL,\n      to_turn_count INTEGER NOT NULL,\n      diff TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      UNIQUE (thread_id, from_turn_count, to_turn_count)\n    )",
+      "CREATE TABLE \"effect_sql_migrations\" (\n  migration_id integer PRIMARY KEY NOT NULL,\n  created_at datetime NOT NULL DEFAULT current_timestamp,\n  name VARCHAR(255) NOT NULL\n)",
+      "CREATE TABLE orchestration_command_receipts (\n      command_id TEXT PRIMARY KEY,\n      aggregate_kind TEXT NOT NULL,\n      aggregate_id TEXT NOT NULL,\n      accepted_at TEXT NOT NULL,\n      result_sequence INTEGER NOT NULL,\n      status TEXT NOT NULL,\n      error TEXT\n    )",
+      "CREATE TABLE orchestration_events (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      event_id TEXT NOT NULL UNIQUE,\n      aggregate_kind TEXT NOT NULL,\n      stream_id TEXT NOT NULL,\n      stream_version INTEGER NOT NULL,\n      event_type TEXT NOT NULL,\n      occurred_at TEXT NOT NULL,\n      command_id TEXT,\n      causation_event_id TEXT,\n      correlation_id TEXT,\n      actor_kind TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      metadata_json TEXT NOT NULL\n    )",
+      "CREATE TABLE projection_pending_approvals (\n      request_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      status TEXT NOT NULL,\n      decision TEXT,\n      created_at TEXT NOT NULL,\n      resolved_at TEXT\n    )",
+      "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT, auto_pull INTEGER NOT NULL DEFAULT 0, project_icon_json TEXT)",
+      "CREATE TABLE projection_state (\n      projector TEXT PRIMARY KEY,\n      last_applied_sequence INTEGER NOT NULL,\n      updated_at TEXT NOT NULL\n    )",
+      "CREATE TABLE projection_thread_activities (\n      activity_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      tone TEXT NOT NULL,\n      kind TEXT NOT NULL,\n      summary TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      created_at TEXT NOT NULL\n    , sequence INTEGER)",
+      "CREATE TABLE projection_thread_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      role TEXT NOT NULL,\n      text TEXT NOT NULL,\n      is_streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    , attachments_json TEXT, context_json TEXT)",
+      "CREATE TABLE projection_thread_proposed_plans (\n      plan_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      plan_markdown TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    , implemented_at TEXT, implementation_thread_id TEXT)",
+      "CREATE TABLE projection_thread_pull_requests (\n      thread_id TEXT NOT NULL,\n      host TEXT NOT NULL,\n      repository TEXT NOT NULL,\n      number INTEGER NOT NULL,\n      url TEXT NOT NULL,\n      source TEXT NOT NULL,\n      linked_at TEXT NOT NULL,\n      snapshot_json TEXT,\n      stack_json TEXT,\n      PRIMARY KEY (thread_id, host, repository, number)\n    )",
+      "CREATE TABLE projection_thread_sessions (\n      thread_id TEXT PRIMARY KEY,\n      status TEXT NOT NULL,\n      provider_name TEXT,\n      provider_session_id TEXT,\n      provider_thread_id TEXT,\n      active_turn_id TEXT,\n      last_error TEXT,\n      updated_at TEXT NOT NULL\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', provider_instance_id TEXT)",
+      "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT, branch_pull_request_json TEXT, active_order_key TEXT, title_state_json TEXT, auto_settle_disabled_at TEXT)",
+      "CREATE TABLE projection_turns (\n      row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      pending_message_id TEXT,\n      assistant_message_id TEXT,\n      state TEXT NOT NULL,\n      requested_at TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      checkpoint_turn_count INTEGER,\n      checkpoint_ref TEXT,\n      checkpoint_status TEXT,\n      checkpoint_files_json TEXT NOT NULL, source_proposed_plan_thread_id TEXT, source_proposed_plan_id TEXT,\n      UNIQUE (thread_id, turn_id),\n      UNIQUE (thread_id, checkpoint_turn_count)\n    )",
+      "CREATE TABLE provider_session_runtime (\n      thread_id TEXT PRIMARY KEY,\n      provider_name TEXT NOT NULL,\n      adapter_key TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL DEFAULT 'full-access',\n      status TEXT NOT NULL,\n      last_seen_at TEXT NOT NULL,\n      resume_cursor_json TEXT,\n      runtime_payload_json TEXT\n    , provider_instance_id TEXT)",
+      "CREATE TABLE pull_request_files_viewed (\n      provider TEXT NOT NULL,\n      host TEXT NOT NULL,\n      repository TEXT NOT NULL,\n      number INTEGER NOT NULL,\n      viewer TEXT NOT NULL,\n      path TEXT NOT NULL,\n      revision TEXT,\n      viewed_at TEXT NOT NULL,\n      PRIMARY KEY (provider, host, repository, number, viewer, path)\n    ) WITHOUT ROWID\n  ",
+      "CREATE INDEX idx_auth_pairing_links_active\n    ON auth_pairing_links(revoked_at, consumed_at, expires_at)\n  ",
+      "CREATE INDEX idx_auth_sessions_active\n    ON auth_sessions(revoked_at, expires_at, issued_at)\n  ",
+      "CREATE INDEX idx_checkpoint_diff_blobs_thread_to_turn\n    ON checkpoint_diff_blobs(thread_id, to_turn_count)\n  ",
+      "CREATE INDEX idx_orch_command_receipts_aggregate\n    ON orchestration_command_receipts(aggregate_kind, aggregate_id)\n  ",
+      "CREATE INDEX idx_orch_command_receipts_sequence\n    ON orchestration_command_receipts(result_sequence)\n  ",
+      "CREATE INDEX idx_orch_events_command_id\n    ON orchestration_events(command_id)\n  ",
+      "CREATE INDEX idx_orch_events_correlation_id\n    ON orchestration_events(correlation_id)\n  ",
+      "CREATE INDEX idx_orch_events_stream_sequence\n    ON orchestration_events(aggregate_kind, stream_id, sequence)\n  ",
+      "CREATE UNIQUE INDEX idx_orch_events_stream_version\n    ON orchestration_events(aggregate_kind, stream_id, stream_version)\n  ",
+      "CREATE INDEX idx_projection_pending_approvals_thread_status\n    ON projection_pending_approvals(thread_id, status)\n  ",
+      "CREATE INDEX idx_projection_projects_updated_at\n    ON projection_projects(updated_at)\n  ",
+      "CREATE INDEX idx_projection_projects_workspace_root_deleted_at\n    ON projection_projects(workspace_root, deleted_at)\n  ",
+      "CREATE INDEX idx_projection_thread_activities_thread_created\n    ON projection_thread_activities(thread_id, created_at)\n  ",
+      "CREATE INDEX idx_projection_thread_activities_thread_sequence\n    ON projection_thread_activities(thread_id, sequence)\n  ",
+      "CREATE INDEX idx_projection_thread_activities_thread_sequence_created_id\n    ON projection_thread_activities(thread_id, sequence, created_at, activity_id)\n  ",
+      "CREATE INDEX idx_projection_thread_messages_thread_created\n    ON projection_thread_messages(thread_id, created_at)\n  ",
+      "CREATE INDEX idx_projection_thread_messages_thread_created_id\n    ON projection_thread_messages(thread_id, created_at, message_id)\n  ",
+      "CREATE INDEX idx_projection_thread_proposed_plans_thread_created\n    ON projection_thread_proposed_plans(thread_id, created_at)\n  ",
+      "CREATE INDEX idx_projection_thread_pull_requests_pr\n    ON projection_thread_pull_requests(host, repository, number)\n  ",
+      "CREATE INDEX idx_projection_thread_sessions_instance\n    ON projection_thread_sessions(provider_instance_id)\n  ",
+      "CREATE INDEX idx_projection_thread_sessions_provider_session\n    ON projection_thread_sessions(provider_session_id)\n  ",
+      "CREATE INDEX idx_projection_threads_project_archived_at\n    ON projection_threads(project_id, archived_at)\n  ",
+      "CREATE INDEX idx_projection_threads_project_deleted_created\n    ON projection_threads(project_id, deleted_at, created_at)\n  ",
+      "CREATE INDEX idx_projection_threads_project_id\n    ON projection_threads(project_id)\n  ",
+      "CREATE INDEX idx_projection_threads_shell_active\n    ON projection_threads(deleted_at, archived_at, project_id, created_at, thread_id)\n  ",
+      "CREATE INDEX idx_projection_threads_shell_archived\n    ON projection_threads(deleted_at, archived_at, project_id, thread_id)\n  ",
+      "CREATE INDEX idx_projection_turns_thread_checkpoint_completed\n    ON projection_turns(thread_id, checkpoint_turn_count, completed_at)\n  ",
+      "CREATE INDEX idx_projection_turns_thread_keyset\n    ON projection_turns(thread_id, requested_at, turn_id)\n  ",
+      "CREATE INDEX idx_projection_turns_thread_requested\n    ON projection_turns(thread_id, requested_at)\n  ",
+      "CREATE INDEX idx_provider_session_runtime_instance\n    ON provider_session_runtime(provider_instance_id)\n  ",
+      "CREATE INDEX idx_provider_session_runtime_provider\n    ON provider_session_runtime(provider_name)\n  ",
+      "CREATE INDEX idx_provider_session_runtime_status\n    ON provider_session_runtime(status)\n  "
+    ],
+    "migrations": [
+      {
+        "migration_id": 1,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "OrchestrationEvents"
+      },
+      {
+        "migration_id": 2,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "OrchestrationCommandReceipts"
+      },
+      {
+        "migration_id": 3,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "CheckpointDiffBlobs"
+      },
+      {
+        "migration_id": 4,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProviderSessionRuntime"
+      },
+      {
+        "migration_id": 5,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "Projections"
+      },
+      {
+        "migration_id": 6,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadSessionRuntimeModeColumns"
+      },
+      {
+        "migration_id": 7,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadMessageAttachments"
+      },
+      {
+        "migration_id": 8,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadActivitySequence"
+      },
+      {
+        "migration_id": 9,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProviderSessionRuntimeMode"
+      },
+      {
+        "migration_id": 10,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsRuntimeMode"
+      },
+      {
+        "migration_id": 11,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "OrchestrationThreadCreatedRuntimeMode"
+      },
+      {
+        "migration_id": 12,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsInteractionMode"
+      },
+      {
+        "migration_id": 13,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadProposedPlans"
+      },
+      {
+        "migration_id": 14,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadProposedPlanImplementation"
+      },
+      {
+        "migration_id": 15,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionTurnsSourceProposedPlan"
+      },
+      {
+        "migration_id": 16,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "CanonicalizeModelSelections"
+      },
+      {
+        "migration_id": 17,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsArchivedAt"
+      },
+      {
+        "migration_id": 18,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsArchivedAtIndex"
+      },
+      {
+        "migration_id": 19,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionSnapshotLookupIndexes"
+      },
+      {
+        "migration_id": 20,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthAccessManagement"
+      },
+      {
+        "migration_id": 21,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthSessionClientMetadata"
+      },
+      {
+        "migration_id": 22,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthSessionLastConnectedAt"
+      },
+      {
+        "migration_id": 23,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadShellSummary"
+      },
+      {
+        "migration_id": 24,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "BackfillProjectionThreadShellSummary"
+      },
+      {
+        "migration_id": 25,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "CleanupInvalidProjectionPendingApprovals"
+      },
+      {
+        "migration_id": 26,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "CanonicalizeModelSelectionOptions"
+      },
+      {
+        "migration_id": 27,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProviderSessionRuntimeInstanceId"
+      },
+      {
+        "migration_id": 28,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadSessionInstanceId"
+      },
+      {
+        "migration_id": 29,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadDetailOrderingIndexes"
+      },
+      {
+        "migration_id": 30,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadShellArchiveIndexes"
+      },
+      {
+        "migration_id": 31,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthAuthorizationScopes"
+      },
+      {
+        "migration_id": 32,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthPairingProofKeyThumbprint"
+      },
+      {
+        "migration_id": 33,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsSettled"
+      },
+      {
+        "migration_id": 34,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsSnoozed"
+      },
+      {
+        "migration_id": 35,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadTitleRegeneration"
+      },
+      {
+        "migration_id": 36,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsPinned"
+      },
+      {
+        "migration_id": 37,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionTurnsKeysetIndex"
+      },
+      {
+        "migration_id": 38,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsPinOrderKey"
+      },
+      {
+        "migration_id": 39,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionProjectsDefaultThreadEnvMode"
+      },
+      {
+        "migration_id": 40,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionProjectFaviconPath"
+      },
+      {
+        "migration_id": 41,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "AuthSessionClientConnection"
+      },
+      {
+        "migration_id": 42,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadLinkedPullRequest"
+      },
+      {
+        "migration_id": 43,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsUnsettledAt"
+      },
+      {
+        "migration_id": 44,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ClearAutomaticProjectModelDefaults"
+      },
+      {
+        "migration_id": 45,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionProjectsAutoPull"
+      },
+      {
+        "migration_id": 46,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "RepairAutomaticSettlementTimestamps"
+      },
+      {
+        "migration_id": 47,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionProjectIcon"
+      },
+      {
+        "migration_id": 48,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadBranchPullRequest"
+      },
+      {
+        "migration_id": 49,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsActiveOrderKey"
+      },
+      {
+        "migration_id": 50,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadPullRequests"
+      },
+      {
+        "migration_id": 51,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadMessageContext"
+      },
+      {
+        "migration_id": 52,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadTitleState"
+      },
+      {
+        "migration_id": 53,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "PullRequestFilesViewed"
+      },
+      {
+        "migration_id": 54,
+        "created_at": "2026-01-01 00:00:00",
+        "name": "ProjectionThreadsAutoSettleDisabledAt"
+      }
+    ]
   }
 }

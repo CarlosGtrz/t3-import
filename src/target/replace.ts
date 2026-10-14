@@ -17,6 +17,7 @@ import { safetyError, writeError } from "../core/errors.js";
 import type { TargetOverrides } from "./config.js";
 import { listImports, recordConsolidation, type LedgerRecord, type StoredLedgerRecord } from "./ledger.js";
 import { assertT3Closed, validateTargetDatabase } from "./schema.js";
+import { threadWorkingDirectory } from "./destination.js";
 import {
   IMPORTER_VERSION,
   MAX_SAFE_IMPORT_EVENTS,
@@ -186,6 +187,9 @@ function buildPlan(db: Database.Database, paths: TargetPaths, conversation: Cano
     },
   };
   const planned = planThread(thread, newThreadId, record.projectId, paths, provider, seed, undefined, resumable, conversation.fingerprint, 0, true, metadata);
+  const workspace = threadWorkingDirectory(db, record.threadId, thread.workspace);
+  const created = planned.events.find((entry) => entry.type === "thread.created");
+  if (created) created.payload.worktreePath = workspace.worktreePath;
   const deletedAt = new Date().toISOString();
   const deletions = oldRecords.flatMap((oldRecord, index) => {
     const events = oldRecord.threadId === record.threadId ? oldEvents : readEvents(db, oldRecord.threadId);

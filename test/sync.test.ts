@@ -56,6 +56,90 @@ async function importedFixture(prefix: string): Promise<{ root: string; workspac
   return { root, workspace, paths, conversation };
 }
 
+async function nativeCodexFixture(prefix: string, options: { streamed?: boolean; steered?: boolean; scratch?: boolean } = {}): Promise<{ workspace: string; paths: TargetPaths; conversation: CanonicalConversation; wrapperId: string }> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  process.env.T3_IMPORT_DATA_DIR = join(root, "source-ledger");
+  const paths = createFixture(join(root, "t3"));
+  const initial = canonicalThread(workspace);
+  const visiblePrompt = options.steered ? "First" : "Hello";
+  initial.turns[0]!.user.text = `Injected provider context\n\n${visiblePrompt}${options.steered ? "\n\nSteer\n\nAgain" : ""}`;
+  await importConversations([{ conversation: canonicalConversation(workspace, initial), resume: true }], paths, { dryRun: false, resume: true });
+  const sourceId = initial.sourceSessionId;
+  const wrapperId = "99999999-9999-4999-8999-999999999999";
+  const db = new Database(paths.dbPath);
+  try {
+    const original = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='thread.created'").get(sourceId) as { payload: string };
+    const projectId = JSON.parse(original.payload).projectId as string;
+    if (options.scratch) {
+      const project = db.prepare("SELECT event_id id,payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='project.created'").get(projectId) as { id: string; payload: string };
+      db.prepare("UPDATE orchestration_events SET payload_json=? WHERE event_id=?").run(JSON.stringify({ ...JSON.parse(project.payload), workspaceRoot: join(root, "scratch") }), project.id);
+    }
+    db.prepare("DELETE FROM orchestration_events WHERE aggregate_kind='thread' AND stream_id=?").run(sourceId);
+    db.prepare("DELETE FROM provider_session_runtime WHERE thread_id=?").run(sourceId);
+    const insert = db.prepare(`INSERT INTO orchestration_events (
+      event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+      actor_kind, payload_json, metadata_json
+    ) VALUES (?, 'thread', ?, ?, ?, ?, ?, ?, ?)`);
+    let version = 0;
+    const add = (eventId: string, type: string, occurredAt: string, actor: string, payload: unknown, metadata: unknown = {}) => {
+      insert.run(eventId, wrapperId, version++, type, occurredAt, actor, JSON.stringify(payload), JSON.stringify(metadata));
+    };
+    const turn = initial.turns[0]!;
+    const messageId = "native-user-message";
+    add("native-thread-created", "thread.created", initial.createdAt, "server", {
+      threadId: wrapperId, projectId, title: initial.title,
+      modelSelection: { instanceId: "codex", model: initial.model, options: [] },
+      runtimeMode: "full-access", interactionMode: "default", branch: null, worktreePath: null,
+      createdAt: initial.createdAt, updatedAt: initial.createdAt,
+    });
+    add("native-user", "thread.message-sent", turn.user.timestamp, "client", {
+      threadId: wrapperId, messageId, role: "user", text: visiblePrompt, attachments: [], turnId: null,
+      streaming: false, createdAt: turn.user.timestamp, updatedAt: turn.user.timestamp,
+    });
+    add("native-turn-start", "thread.turn-start-requested", turn.startedAt, "client", {
+      threadId: wrapperId, messageId, modelSelection: { instanceId: "codex", model: initial.model, options: [] },
+      titleSeed: "Hello", runtimeMode: "full-access", interactionMode: "default", createdAt: turn.startedAt,
+    });
+    add("native-running", "thread.session-set", turn.startedAt, "provider", {
+      threadId: wrapperId, session: { threadId: wrapperId, status: "running", providerName: "codex", providerInstanceId: "codex", activeTurnId: turn.id },
+    }, { adapterKey: "codex", providerTurnId: turn.id });
+    const answer = turn.assistant[0]!.text;
+    add("native-assistant", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", {
+      threadId: wrapperId, messageId: "native-assistant-message", role: "assistant", text: turn.assistant[0]!.text,
+      turnId: turn.id, streaming: false, createdAt: turn.assistant[0]!.timestamp, updatedAt: turn.assistant[0]!.timestamp,
+    }, { adapterKey: "codex", providerTurnId: turn.id });
+    if (options.streamed || options.steered) {
+      const first = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_id='native-assistant'").get() as { payload: string };
+      const payload = JSON.parse(first.payload);
+      db.prepare("UPDATE orchestration_events SET payload_json=? WHERE event_id='native-assistant'").run(JSON.stringify({ ...payload, text: answer.slice(0, 1), streaming: true }));
+      if (options.steered) {
+        for (const [index, text] of ["Steer", "Again"].entries()) {
+          add(`native-steer-${index}`, "thread.message-sent", turn.user.timestamp, "client", {
+            threadId: wrapperId, messageId: `native-steer-${index}`, role: "user", text,
+            attachments: [], turnId: null, streaming: false, createdAt: turn.user.timestamp, updatedAt: turn.user.timestamp,
+          });
+        }
+      }
+      add("native-assistant-delta", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", { ...payload, text: answer.slice(1), streaming: true });
+      add("native-assistant-final", "thread.message-sent", turn.assistant[0]!.timestamp, "provider", { ...payload, text: "", streaming: false });
+    }
+    add("native-ready", "thread.session-set", turn.completedAt!, "provider", {
+      threadId: wrapperId, session: { threadId: wrapperId, status: "ready", providerName: "codex", providerInstanceId: "codex", activeTurnId: null },
+    }, { adapterKey: "codex", providerTurnId: turn.id });
+    db.prepare(`INSERT INTO provider_session_runtime (
+      thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode,
+      status, last_seen_at, resume_cursor_json, runtime_payload_json
+    ) VALUES (?, 'codex', 'codex', 'codex', 'full-access', 'stopped', ?, ?, ?)`).run(
+      wrapperId, turn.completedAt, JSON.stringify({ threadId: sourceId }), JSON.stringify(options.scratch ? { cwd: workspace } : {}),
+    );
+  } finally { db.close(); }
+  process.env.T3_IMPORT_DATA_DIR = join(root, "native-ledger");
+  caughtUp(paths);
+  return { workspace, paths, conversation: advancedConversation(workspace, initial), wrapperId };
+}
+
 function advancedConversation(workspace: string, sourceThread = canonicalThread(workspace)): CanonicalConversation {
   sourceThread.turns.push(secondTurn());
   sourceThread.updatedAt = "2026-01-02T00:00:03.000Z";
@@ -308,6 +392,120 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i incremental synchronization", 
     const result = await syncConversations([{ conversation }], paths, { dryRun: false });
     expect(result.results[0]).toMatchObject({ status: "synced", turnsAdded: 0, turnsAdopted: 1, events: 0 });
     expect(result.backup).not.toBeNull();
+  });
+
+  it("adopts a native Codex T3 wrapper and appends only the missing turns", async () => {
+    const { paths, conversation, wrapperId } = await nativeCodexFixture("t3-sync-native-codex-");
+    const before = eventCount(paths.dbPath);
+    const sequenceDb = new Database(paths.dbPath, { readonly: true });
+    const beforeSequence = (sequenceDb.prepare("SELECT COALESCE(MAX(sequence), 0) value FROM orchestration_events").get() as { value: number }).value;
+    sequenceDb.close();
+    const preview = await inspectConversationSync(conversation, paths);
+    expect(preview).toMatchObject({ status: "syncable", newTurns: 1, previouslyImported: true, threadId: wrapperId });
+
+    const dryRun = await syncConversations([{ conversation }], paths, { dryRun: true });
+    expect(dryRun.results[0]).toMatchObject({ status: "dry-run", threadId: wrapperId, turnsAdded: 1 });
+    expect(eventCount(paths.dbPath)).toBe(before);
+
+    const first = await syncConversations([{ conversation }], paths, { dryRun: false });
+    expect(first.status).toBe("synced");
+    expect(first.results[0]).toMatchObject({ status: "synced", threadId: wrapperId, turnsAdded: 1 });
+    const db = new Database(paths.dbPath, { readonly: true });
+    try {
+      const created = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND event_type='thread.created'").get(wrapperId) as { count: number };
+      const users = db.prepare("SELECT payload_json payload, metadata_json metadata FROM orchestration_events WHERE stream_id=? AND event_type='thread.message-sent' AND json_extract(payload_json, '$.role')='user' ORDER BY sequence").all(wrapperId) as Array<{ payload: string; metadata: string }>;
+      const importedMessages = db.prepare("SELECT payload_json payload, metadata_json metadata FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.message-sent'").all(wrapperId, beforeSequence) as Array<{ payload: string; metadata: string }>;
+      const importedTurnStarts = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.turn-start-requested'").get(wrapperId, beforeSequence) as { count: number };
+      const importedSessions = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE stream_id=? AND sequence>? AND event_type='thread.session-set'").get(wrapperId, beforeSequence) as { count: number };
+      expect(created.count).toBe(1);
+      expect(users.map((row) => JSON.parse(row.payload).text)).toEqual(["Hello", "Continue"]);
+      expect(importedTurnStarts.count).toBe(0);
+      expect(importedSessions.count).toBe(0);
+      expect(importedMessages).toHaveLength(2);
+      expect(importedMessages.every((row) => JSON.parse(row.metadata).historyImport === true)).toBe(true);
+      expect(importedMessages.every((row) => JSON.parse(row.payload).turnId === null)).toBe(true);
+    } finally { db.close(); }
+
+    const nativeTurn = secondTurn();
+    nativeTurn.id = "turn-3";
+    nativeTurn.user.sourceId = "native-user-3";
+    nativeTurn.user.text = "Already continued in T3";
+    nativeTurn.assistant[0]!.sourceId = "native-assistant-3";
+    nativeTurn.assistant[0]!.text = "T3 continuation";
+    conversation.threads[0]!.turns.push(nativeTurn);
+    conversation.threads[0]!.updatedAt = nativeTurn.completedAt!;
+    conversation.summary.updatedAt = nativeTurn.completedAt!;
+    conversation.fingerprint = "fixture-native-t3-continuation";
+    const resumed = new Database(paths.dbPath);
+    try {
+      let version = (resumed.prepare("SELECT COALESCE(MAX(stream_version), -1) + 1 value FROM orchestration_events WHERE aggregate_kind='thread' AND stream_id=?").get(wrapperId) as { value: number }).value;
+      const insert = resumed.prepare(`INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+        actor_kind, payload_json, metadata_json
+      ) VALUES (?, 'thread', ?, ?, ?, ?, 'provider', ?, ?)`);
+      const add = (eventId: string, type: string, occurredAt: string, payload: unknown, metadata: unknown = {}) => {
+        insert.run(eventId, wrapperId, version++, type, occurredAt, JSON.stringify(payload), JSON.stringify(metadata));
+      };
+      add("native-user-3-event", "thread.message-sent", nativeTurn.user.timestamp, {
+        threadId: wrapperId, messageId: "native-user-message-3", role: "user", text: nativeTurn.user.text,
+        attachments: [], turnId: null, streaming: false, createdAt: nativeTurn.user.timestamp, updatedAt: nativeTurn.user.timestamp,
+      });
+      add("native-assistant-3-event", "thread.message-sent", nativeTurn.assistant[0]!.timestamp, {
+        threadId: wrapperId, messageId: "native-assistant-message-3", role: "assistant", text: nativeTurn.assistant[0]!.text,
+        turnId: nativeTurn.id, streaming: false, createdAt: nativeTurn.assistant[0]!.timestamp, updatedAt: nativeTurn.assistant[0]!.timestamp,
+      });
+      add("native-ready-3-event", "thread.session-set", nativeTurn.completedAt!, {
+        threadId: wrapperId, session: { threadId: wrapperId, status: "ready", providerName: "codex", providerInstanceId: "codex", activeTurnId: null },
+      });
+    } finally { resumed.close(); }
+
+    caughtUp(paths);
+    const adopted = await syncConversations([{ conversation }], paths, { dryRun: false });
+    expect(adopted.status).toBe("synced");
+    expect(adopted.results[0]).toMatchObject({ status: "synced", threadId: wrapperId, turnsAdded: 0, turnsAdopted: 1, events: 0 });
+
+    caughtUp(paths);
+    const repeated = await syncConversations([{ conversation }], paths, { dryRun: false });
+    expect(repeated.status).toBe("up-to-date");
+    expect(repeated.results[0]).toMatchObject({ status: "up-to-date", threadId: wrapperId, turnsAdded: 0, events: 0 });
+  });
+
+  it("reconstructs streamed native messages from deltas and empty final events", async () => {
+    const { paths, conversation, wrapperId } = await nativeCodexFixture("t3-sync-native-deltas-", { streamed: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1, threadId: wrapperId });
+  });
+
+  it("groups steered inputs only when the native provider turn identity matches", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-steering-", { steered: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1 });
+    conversation.threads[0]!.turns[0]!.id = "different-provider-turn";
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "history-diverged", newTurns: 0 });
+  });
+
+  it("adopts scratch threads only through their exact recorded runtime cwd", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-scratch-", { scratch: true });
+    expect(await inspectConversationSync(conversation, paths)).toMatchObject({ status: "syncable", newTurns: 1, titleChanged: false });
+  });
+
+  it("refuses native Codex adoption when the existing visible transcript diverges", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-diverged-");
+    conversation.threads[0]!.turns[0]!.assistant[0]!.text = "Changed native answer";
+    const before = eventCount(paths.dbPath);
+    const result = await syncConversations([{ conversation }], paths, { dryRun: false });
+    expect(result.hasConflicts).toBe(true);
+    expect(result.results[0]!.status).toBe("history-diverged");
+    expect(result.backup).toBeNull();
+    expect(eventCount(paths.dbPath)).toBe(before);
+  });
+
+  it("does not adopt a native Codex thread from a different project root", async () => {
+    const { paths, conversation } = await nativeCodexFixture("t3-sync-native-wrong-project-");
+    conversation.threads[0]!.workspace = `${conversation.threads[0]!.workspace}-other`;
+    const before = eventCount(paths.dbPath);
+    const result = await syncConversations([{ conversation }], paths, { dryRun: false });
+    expect(result.results[0]!.status).toBe("not-imported");
+    expect(result.backup).toBeNull();
+    expect(eventCount(paths.dbPath)).toBe(before);
   });
 
   it("syncs a linear Claude lineage and rejects a later branch", async () => {

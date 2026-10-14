@@ -29,6 +29,7 @@ import { safetyError, writeError } from "../core/errors.js";
 import { resolveProviderSelection, type TargetOverrides } from "./config.js";
 import { assertT3Closed, validateTargetDatabase } from "./schema.js";
 import { recordImports, type LedgerRecord } from "./ledger.js";
+import { importDestination, threadWorkingDirectory, validateDestinationOptions, type DestinationOptions } from "./destination.js";
 
 const EVENT_TYPES = [
   "project.created",
@@ -75,6 +76,7 @@ export interface PlannedThread {
   warnings: string[];
   alreadyImported: boolean;
   fingerprint: string;
+  workingDirectory?: string;
 }
 
 export const MAX_SAFE_IMPORT_EVENTS = 900;
@@ -161,7 +163,7 @@ export function compactThreadForImport(thread: CanonicalThread): CanonicalThread
   };
 }
 
-export interface ImportOptions extends TargetOverrides {
+export interface ImportOptions extends TargetOverrides, DestinationOptions {
   dryRun: boolean;
   resume: boolean;
 }
@@ -427,6 +429,7 @@ export async function importConversations(
   paths: TargetPaths,
   options: ImportOptions,
 ): Promise<ImportRunResult> {
+  validateDestinationOptions(options);
   if (!existsSync(paths.dbPath)) throw safetyError(`T3 database not found: ${paths.dbPath}`);
   await assertT3Closed(paths);
   const releaseLock = options.dryRun ? () => {} : acquireLock(paths);
@@ -446,20 +449,37 @@ export async function importConversations(
           ? thread.sourceSessionId
           : deterministicUuid(`t3-import:thread:${thread.sourceKey}`);
         const imported = isImported(db, thread.sourceKey, thread, threadId);
-        const workspaceKey = canonicalPath(thread.workspace);
+        const destination = importDestination(db, paths, thread.workspace, options);
+        const workspaceKey = canonicalPath(destination?.projectRoot ?? thread.workspace);
         let projectId = projectIds.get(workspaceKey) ?? existingProjectId(db, thread.workspace);
+        if (destination) projectId = destination.projectId;
+        if (imported) {
+          const original = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE stream_id=? AND event_type='thread.created' ORDER BY sequence LIMIT 1").get(threadId) as { payload: string } | undefined;
+          if (original) {
+            const created = JSON.parse(original.payload) as { projectId: string };
+            const current = threadWorkingDirectory(db, threadId, thread.workspace);
+            if (destination && (created.projectId !== destination.projectId || current.worktreePath !== destination.worktreePath)) throw safetyError("This thread is already imported into another destination. Import does not move existing threads; use a supported T3 project/workspace operation.");
+            projectId = created.projectId;
+          }
+        }
         if (!projectId) projectId = deterministicUuid(`t3-import:project:${workspaceKey}`);
         projectIds.set(workspaceKey, projectId);
         const provider = resolveProviderSelection(paths, thread.source, thread.model, thread.effort, options.providerInstance);
         const seed = thread.sourceKey;
-        const projectEvent = !imported && !existingProjectId(db, thread.workspace) && !plannedProjectEvents.has(projectId)
+        const needsProject = destination ? destination.createProject : !existingProjectId(db, thread.workspace);
+        const projectEvent = !imported && needsProject && !plannedProjectEvents.has(projectId)
           ? event(`project:${workspaceKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
-              projectId, title: basename(thread.workspace), workspaceRoot: thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
+              projectId, title: options.noProject ? "No project" : basename(thread.workspace), workspaceRoot: destination?.projectRoot ?? thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
             })
           : undefined;
         if (projectEvent) plannedProjectEvents.add(projectId);
         const resumable = options.resume && selection.resume && thread.currentBranch && Boolean(thread.resumeCursor);
         const plan = planThread(thread, threadId, projectId, paths, provider, seed, projectEvent, resumable, selection.conversation.fingerprint);
+        if (destination) {
+          plan.workingDirectory = destination.workingDirectory;
+          const created = plan.events.find((entry) => entry.type === "thread.created");
+          if (created) created.payload.worktreePath = destination.worktreePath;
+        }
         plan.alreadyImported = imported;
         planned.push(plan);
       }
@@ -472,6 +492,8 @@ export async function importConversations(
       status: plan.alreadyImported ? "already-imported" : options.dryRun ? "dry-run" : "imported",
       threadId: plan.threadId,
       projectId: plan.projectId,
+      sourceWorkspace: plan.thread.workspace,
+      workingDirectory: plan.workingDirectory ?? (plan.alreadyImported ? threadWorkingDirectory(db, plan.threadId, plan.thread.workspace).cwd : plan.thread.workspace),
       title: plan.thread.title,
       turns: plan.thread.turns.length,
       messages: plan.thread.turns.reduce((sum, turn) => sum + 1 + turn.assistant.length, 0),

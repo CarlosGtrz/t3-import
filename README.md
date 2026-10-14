@@ -2,7 +2,7 @@
 
 `t3-import` is an independent, local-only CLI for importing Codex and Claude Code conversation history into [T3 Code](https://github.com/pingdotgg/t3code). It writes canonical orchestration events while T3 is closed; T3 rebuilds its own projections on the next launch. The original provider session is bound so the current branch can resume when the source history is still available.
 
-Compatibility is intentionally explicit: **T3 migrations 40–53**, Node.js 22 or newer, and local files only. Unknown T3 schemas fail closed.
+Compatibility is intentionally explicit: **T3 migrations 40–54**, Node.js 22 or newer, and local files only. Unknown T3 schemas fail closed.
 
 ## How it works
 
@@ -12,7 +12,7 @@ To keep T3 startup bounded, imports preserve every message, turn boundary, plan,
 
 With T3 Code closed, the importer validates the local database against the supported migration profiles and creates a verified backup. It then appends canonical events to `orchestration_events` and adds provider-session bindings for conversations that can be resumed. It does not modify T3's projection tables: T3 Code rebuilds them from the imported events the next time it starts. After a successful write, the importer also backs up and resets T3's rebuildable IndexedDB origin cache so stale task snapshots cannot hide newly imported history.
 
-After an initial import, `t3-import` can append newly settled Codex turns and newly settled turns from linear Claude conversations. Completed, interrupted, and failed turns are preserved; only genuinely active or indeterminate turns are ignored during synchronization. It verifies that the imported checkpoint is still an exact prefix, adopts exact turns already created by resuming through T3, and never replaces edited or deleted history. Claude sessions with multiple non-sidechain leaves after deterministic compaction and retry normalization are reported as conflicts rather than guessed.
+`sync` can append newly settled Codex turns and newly settled turns from linear Claude conversations to imported tasks. It can also adopt a native T3 Codex wrapper when its stopped provider binding points to exactly one source session in the same project. Before appending, it verifies that the wrapper's visible user and assistant history is a settled prefix of the provider transcript; a mismatch or ambiguous binding is reported as a conflict. The wrapper's T3 thread ID and local title are preserved, and the already-visible prefix is not written again. Completed, interrupted, and failed turns are preserved; only genuinely active or indeterminate turns are ignored during synchronization. Claude sessions with multiple non-sidechain leaves after deterministic compaction and retry normalization are reported as conflicts rather than guessed. This is an explicit one-shot sync; it does not watch sessions or synchronize continuously in the background.
 
 If an imported task has diverged or was created by an older importer, `replace` can create a fresh, complete canonical task from the provider transcript. The old task is soft-deleted with a `thread.deleted` event, while its immutable event stream remains available for audit. The provider instance, model, resume cursor, project, and synchronization identity move to the new task atomically. When deterministic normalization reduces a previously fragmented Claude session to one leaf, replacement consolidates every still-visible imported fragment of that session into the new task. Replacement is available for Codex and for Claude sessions with one normalized non-sidechain leaf, and it refuses to snapshot an active provider turn.
 
@@ -27,6 +27,12 @@ t3-import
 ```
 
 Running without a command opens the interactive TUI. It guides you through source, workspace, provider instance, conversation selection, review, confirmation, and results, then offers to start T3 Code with Yes selected by default.
+
+For non-interactive `import`, `--workspace` is required and filters source discovery. By default, the destination project is determined by the selected conversation's recorded workspace: the importer reuses a matching T3 project or creates one named after that directory. It does not clone or move the source repository. Omitting `--workspace` does not select T3's "No project" area.
+
+To choose a destination explicitly, pass `--target-project <project-id>` for an existing, non-deleted T3 project. Its root must match the source cwd; otherwise the importer refuses rather than silently changing where resumed work runs. Project IDs can be inspected in the target database with a read-only query such as `SELECT project_id, title, workspace_root FROM projection_projects WHERE deleted_at IS NULL`.
+
+`--no-project` uses T3's native scratch project and keeps the source folder as the thread's `worktreePath`. It requires the source cwd to be an existing direct child of `<t3-home>/scratch`, outside Git checkouts. It refuses external folders and symlinks escaping that layout. It does not move or copy files, create a replacement source folder, or reinterpret an arbitrary directory as managed scratch. The two destination options are mutually exclusive and currently available only through the non-interactive CLI. Preview results include `sourceWorkspace` and `workingDirectory`. Re-importing does not move an existing thread; sync and replacement retain its destination.
 
 ## Interactive demo
 
@@ -43,10 +49,21 @@ t3-import import --source codex --workspace C:\src\my-project --thread <thread-i
 t3-import import --source claude --workspace C:\src\my-project --all --since 2026-01-01 --yes --non-interactive
 t3-import sync --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
 t3-import sync --source claude --workspace C:\src\my-project --all --yes --non-interactive
+t3-import sync --source codex --all --yes --summary
 t3-import replace --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
 t3-import cache reset --yes
 t3-import doctor --json
 ```
+
+### Synchronize all linked Codex conversations
+
+Close T3 Code, then run `t3-import sync --source codex --all --yes --summary` without `--workspace`. This checks existing provider bindings and import checkpoints across all projects, including scratch workspaces. It does not import unrelated Codex rollouts. Add `--dry-run` to preview without changing the target or import ledger.
+
+Only settled additions after a verified matching history are appended. Streaming message deltas and steered user inputs are reconstructed using the recorded provider turn identity. Existing T3 titles are preserved. Divergent histories, ambiguous bindings, and missing source files are skipped; safe updates in the same batch can still succeed. Exit code 7 reports these skipped cases. Separate branches are not automatically merged or replaced.
+
+Reopen T3 after the command finishes to rebuild its projections and see the changes. Writes retain the normal database backup and recoverable cache reset. For this development checkout, `bash scripts/sync-all.sh` selects an installed Node 24 through nvm and checks the native SQLite addon before running the same command. Additional flags, such as `--dry-run` or `--json`, can be passed to the script.
+
+See the [validation report](docs/codex-sync-validation.md) for automated tests, database copy checks, live application confirmation, and remaining reconciliation limits.
 
 Global target options can be placed before or after a subcommand:
 
@@ -71,13 +88,15 @@ Import options:
 --yes
 --non-interactive
 --no-resume
+--target-project <id>     Existing T3 project with a root matching source cwd
+--no-project              Native scratch destination, only for an existing scratch source cwd
 ```
 
 Sync options:
 
 ```text
 --thread <id>             Repeatable; mutually exclusive with --all
---all                     Sync previously imported conversations only
+--all                     Sync imported tasks and safely adopt matching native Codex threads
 --since <ISO date>
 --dry-run
 --yes
@@ -95,14 +114,16 @@ Replace options:
 
 The normal TUI labels conversations as new, syncable, up to date, active-only, or conflicted. Interrupted and failed additions are called out in the status text, and ignored active turns are shown without enabling them for synchronization. A history conflict is labeled `history changed · replace available` when it can be replaced. Replacement choices cannot be mixed with imports or ordinary syncs. The dedicated `sync` and `replace` commands open focused TUI flows when required arguments are omitted on a terminal.
 
-When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` live-T3 safety, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
+When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` safety refusal including live T3 or a corrupt import ledger, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
 
 ## Safety and storage
 
 - Close T3 before every real import. There is deliberately no force bypass.
 - Every write creates and verifies a timestamped SQLite backup under `<state-dir>/t3-import-backups/`.
+- Automatic backups cover the T3 database and, when reset, its IndexedDB cache. They do not include the external import ledger. Keep a separate consistent ledger backup if you need recovery. If a ledger is corrupt, preserve it and its WAL/SHM sidecars; restore a verified user-maintained backup if available, or investigate recovery before further writes. Do not simply delete it, since it may contain replacement history.
 - Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
 - The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
+- Native Codex adoption requires one stopped provider binding, an exact project-root match, and a verified visible transcript prefix. Ambiguous or divergent histories are left untouched and reported as conflicts.
 - Imports are idempotent. A second import reports `already-imported`. `sync` only appends completed, interrupted, or failed turns after an unchanged checkpoint, and repeated syncs are no-ops. `replace` promotes one complete new task as the sole synchronization target and soft-deletes the old canonical task; repeating it against that unchanged replacement is also a no-op.
 - New imports are rejected when T3 has an existing projection backlog or when the compact event plan exceeds the safe 900-event startup budget.
 - Supported local image attachments are copied atomically. Remote images are referenced but not downloaded.
@@ -128,7 +149,7 @@ npm run build
 npm pack
 ```
 
-Compatibility is validated against pinned historical T3 commits for every migration from 40 through 53, including stable `v0.0.42` (`719a76ca1`) and nightly `v0.0.43-nightly.20260920.2031` (`adcd90858`). Earlier versions and unvalidated future migrations fail closed. The importer never upgrades a T3 database; T3 owns migrations, and existing imports can continue synchronizing after an upgrade within the supported range.
+Compatibility is validated against pinned historical T3 commits for every migration from 40 through 54, including stable `v0.0.42` (`719a76ca1`) and nightly `v0.0.43-nightly.20260920.2031` (`adcd90858`), and stable `v0.0.44` (`451afcb22`). Earlier versions and unvalidated future migrations fail closed. The importer never upgrades a T3 database; T3 owns migrations, and existing imports can continue synchronizing after an upgrade within the supported range.
 
 `npm test` uses committed schemas generated from T3's actual migrations. The additional integration matrix runs the historical event decoders, projectors, and provider restoration services against synthetic databases:
 
@@ -136,6 +157,6 @@ Compatibility is validated against pinned historical T3 commits for every migrat
 npm run test:compatibility
 ```
 
-This requires Git, tar, Node.js 22.21.1 or newer, network access for isolated development dependencies, and a T3 checkout containing the pinned commits at `repos/t3code` (override with `T3_REFERENCE_REPO`). It prepares source snapshots under `artifacts/compatibility`, exercises both providers at all fourteen migrations and every upgrade to 53, and writes a JSON result report. Provider processes are replaced with controlled test adapters; no paid provider work runs. The installed T3 application and live database are not used.
+This requires Git, tar, Node.js 22.21.1 or newer, network access for isolated development dependencies, and a T3 checkout containing the pinned commits at `repos/t3code` (override with `T3_REFERENCE_REPO`). It prepares source snapshots under `artifacts/compatibility`, exercises both providers at all fifteen migrations and every upgrade to 54, and writes a JSON result report. Provider processes are replaced with controlled test adapters; no paid provider work runs. The installed T3 application and live database are not used.
 
 See [compatibility validation](https://github.com/CarlosGtrz/t3-import/blob/main/docs/compatibility.md) for reference commits, fixture regeneration, and the exact validation boundary.
