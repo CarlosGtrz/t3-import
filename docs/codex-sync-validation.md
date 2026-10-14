@@ -40,7 +40,7 @@ On 12 October 2026, regression coverage was added in response to the review on P
 
 The focused ledger suites passed 8 tests. The full suite passed 624 tests across 12 files. Type checking, build, and `git diff --check` passed.
 
-Read-only refers to the database data and schema. SQLite may create or rebuild `-shm`; on a WAL-mode corrupt database it may also create an empty WAL before detecting the corruption. The tests do not promise an unchanged shared-memory index. The reader deliberately avoids immutable mode so it can see committed WAL transactions. Corruption errors do not attempt repairs and ask the user to preserve the database and sidecars before restoring a verified ledger backup.
+Read-only refers to the database data and schema. SQLite may create or rebuild `-shm`; on a WAL-mode corrupt database it may also create an empty WAL before detecting the corruption. The tests do not promise an unchanged shared-memory index. The reader deliberately avoids immutable mode so it can see committed WAL transactions. Corruption errors use safety exit code 4 and do not attempt repairs. They ask the user to preserve the ledger and sidecars. Automatic backups do not include the external ledger; recovery requires a verified user-maintained backup if available, or further investigation before writes. Deleting the ledger can lose replacement history and is not recommended.
 
 ## Database copy experiment
 

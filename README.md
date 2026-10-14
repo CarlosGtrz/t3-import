@@ -28,6 +28,8 @@ t3-import
 
 Running without a command opens the interactive TUI. It guides you through source, workspace, provider instance, conversation selection, review, confirmation, and results, then offers to start T3 Code with Yes selected by default.
 
+For non-interactive `import`, `--workspace` is required and filters source discovery. The destination project is determined by the selected conversation's recorded workspace: the importer reuses a matching T3 project or creates one named after that directory. It does not clone or move the source repository. There is currently no independent destination-project option or import into T3's "No project" scratch area. Omitting `--workspace` does not select that area.
+
 ## Interactive demo
 
 The example below installs the package, launches `t3-import` without parameters, selects Codex, and imports two simulated conversations into T3 Code.
@@ -106,12 +108,13 @@ Replace options:
 
 The normal TUI labels conversations as new, syncable, up to date, active-only, or conflicted. Interrupted and failed additions are called out in the status text, and ignored active turns are shown without enabling them for synchronization. A history conflict is labeled `history changed · replace available` when it can be replaced. Replacement choices cannot be mixed with imports or ordinary syncs. The dedicated `sync` and `replace` commands open focused TUI flows when required arguments are omitted on a terminal.
 
-When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` live-T3 safety, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
+When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` safety refusal including live T3 or a corrupt import ledger, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
 
 ## Safety and storage
 
 - Close T3 before every real import. There is deliberately no force bypass.
 - Every write creates and verifies a timestamped SQLite backup under `<state-dir>/t3-import-backups/`.
+- Automatic backups cover the T3 database and, when reset, its IndexedDB cache. They do not include the external import ledger. Keep a separate consistent ledger backup if you need recovery. If a ledger is corrupt, preserve it and its WAL/SHM sidecars; restore a verified user-maintained backup if available, or investigate recovery before further writes. Do not simply delete it, since it may contain replacement history.
 - Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
 - The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
 - Native Codex adoption requires one stopped provider binding, an exact project-root match, and a verified visible transcript prefix. Ambiguous or divergent histories are left untouched and reported as conflicts.

@@ -140,7 +140,10 @@ describe("ledger inspection safety", () => {
       expect(error).toMatchObject({ name: "ImporterError", exitCode: 4 });
       expect((error as Error).message).toContain(ledgerPath);
       expect((error as Error).message).toContain(code);
-      expect((error as Error).message).toContain("restore a verified ledger backup");
+      expect((error as Error).message).toContain("Automatic T3 backups do not include this external ledger");
+      expect((error as Error).message).toContain("If you have a verified user-maintained ledger backup");
+      expect((error as Error).message).toContain("otherwise investigate recovery before further writes");
+      expect((error as Error).message).toContain("Do not delete the ledger");
     };
     try { listImports(targetId(paths)); throw new Error("Expected corruption error"); }
     catch (error) { checkError(error); }

@@ -229,7 +229,7 @@ export function listImports(targetId: string, source?: string): StoredLedgerReco
   } catch (error) {
     if (error instanceof Error && "code" in error &&
         (error.code === "SQLITE_CORRUPT" || error.code === "SQLITE_NOTADB")) {
-      throw safetyError(`Cannot read import ledger at ${path}: SQLite reports ${error.code}. Preserve the ledger and any -wal/-shm files, then restore a verified ledger backup before retrying. No ledger repair was attempted.`);
+      throw safetyError(`Cannot read import ledger at ${path}: SQLite reports ${error.code}. Preserve the ledger and any -wal/-shm files. Automatic T3 backups do not include this external ledger. If you have a verified user-maintained ledger backup, restore it before retrying; otherwise investigate recovery before further writes. Do not delete the ledger: it may contain replacement history. No ledger repair was attempted.`);
     }
     throw error;
   } finally { db?.close(); }
