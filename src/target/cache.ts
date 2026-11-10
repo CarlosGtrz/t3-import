@@ -15,7 +15,7 @@ import type { CacheResetResult, TargetPaths } from "../core/types.js";
 import { safetyError, writeError } from "../core/errors.js";
 import { assertT3Closed } from "./schema.js";
 
-const PROFILE_NAMES = ["T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code", "t3code"];
+const PROFILE_NAMES = ["T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code", "t3code", "t3code-v2"];
 const CACHE_NAMES = ["t3code_app_0.indexeddb.leveldb", "t3code_app_0.indexeddb.blob"];
 
 export interface CacheDiscoveryOptions {
