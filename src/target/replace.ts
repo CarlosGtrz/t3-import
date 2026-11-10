@@ -28,12 +28,15 @@ import {
   modelSelection,
   planThread,
   projectionBacklog,
+  resolveSafeEventLimit,
   type PlannedThread,
 } from "./importer.js";
 import { bootstrapCheckpoint, createEvent, existingProvider, findRecord, readEvents, targetId } from "./sync.js";
 
 export interface ReplaceOptions extends TargetOverrides {
   dryRun: boolean;
+  maxEvents?: number | undefined;
+  force?: boolean | undefined;
 }
 
 interface RuntimeRow {
@@ -248,7 +251,8 @@ export async function replaceConversations(selections: ReplaceSelection[], paths
       const backlog = projectionBacklog(db);
       if (backlog.backlog > 0) throw safetyError(`T3 has ${backlog.backlog} unprojected event${backlog.backlog === 1 ? "" : "s"}. Open T3 and let it finish loading before replacing conversations.`);
       const count = writable.reduce((sum, plan) => sum + plan.planned!.events.length + plan.deletions!.length, 0);
-      if (count > MAX_SAFE_IMPORT_EVENTS) throw safetyError(`Replacement would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. Replace fewer conversations at a time.`);
+      const safeLimit = resolveSafeEventLimit(options.maxEvents, options.force);
+      if (count > safeLimit) throw safetyError(`Replacement would append ${count} events, exceeding the safe one-launch limit of ${safeLimit}. Replace fewer conversations at a time, or use --force / --max-events.`);
     }
     if (options.dryRun || writable.length === 0) {
       const results = plans.map((plan) => plan.result);

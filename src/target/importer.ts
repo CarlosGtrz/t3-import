@@ -166,6 +166,19 @@ export interface ImportOptions extends TargetOverrides {
   resume: boolean;
   targetProjectId?: string | undefined;
   noProject?: boolean | undefined;
+  maxEvents?: number | undefined;
+  force?: boolean | undefined;
+}
+
+export function resolveSafeEventLimit(customLimit?: number, force?: boolean): number {
+  if (force) return Number.MAX_SAFE_INTEGER;
+  if (typeof customLimit === "number" && customLimit > 0) return customLimit;
+  const envVal = process.env.T3_IMPORT_MAX_EVENTS;
+  if (envVal) {
+    const parsed = parseInt(envVal, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return MAX_SAFE_IMPORT_EVENTS;
 }
 
 export function projectionBacklog(db: Database.Database): { latestSequence: number; projectedSequence: number; backlog: number } {
@@ -545,10 +558,11 @@ export async function importConversations(
         );
       }
       const plannedEventCount = toWrite.reduce((sum, plan) => sum + plan.events.length, 0);
-      if (plannedEventCount > MAX_SAFE_IMPORT_EVENTS) {
+      const safeLimit = resolveSafeEventLimit(options.maxEvents, options.force);
+      if (plannedEventCount > safeLimit) {
         throw safetyError(
-          `The compact import would append ${plannedEventCount} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. ` +
-          "Import fewer conversations at a time or select shorter histories.",
+          `The compact import would append ${plannedEventCount} events, exceeding the safe one-launch limit of ${safeLimit}. ` +
+          "Import fewer conversations at a time, select shorter histories, or use --force / --max-events.",
         );
       }
     }

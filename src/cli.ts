@@ -87,10 +87,21 @@ program
   .option("--json", "以 JSON 格式输出结果")
   .option("--no-color", "禁用彩色终端输出")
   .option("--no-cache-reset", "写入数据后保留 T3 现有的 IndexedDB 缓存")
+  .option("--max-events <count>", "单次操作安全事件数限制（默认 900）")
+  .option("--force", "跳过安全事件数上限限制")
   .action(async () => {
+    const opts = program.opts<{ maxEvents?: string; force?: boolean }>();
+    const maxEvents = opts.maxEvents ? parseInt(opts.maxEvents, 10) : undefined;
+    const force = Boolean(opts.force);
     const paths = resolveTargetPaths(globalOverrides());
     const provider = globalOverrides().providerInstance;
-    const instance = render(React.createElement(ImportTui, { paths, resetCache: shouldResetCache(), ...(provider ? { initialProvider: provider } : {}) }));
+    const instance = render(React.createElement(ImportTui, {
+      paths,
+      resetCache: shouldResetCache(),
+      ...(provider ? { initialProvider: provider } : {}),
+      ...(maxEvents ? { maxEvents } : {}),
+      ...(force ? { force } : {}),
+    }));
     await instance.waitUntilExit();
   });
 
@@ -179,6 +190,8 @@ program.command("import")
   .option("--no-resume", "不创建续聊会话绑定")
   .option("--no-project", "作为独立对话导入 (无项目 / No project)")
   .option("--target-project <nameOrId>", "导入到指定的已存在 T3 项目 (名称或 ID)")
+  .option("--max-events <count>", "单次操作安全事件数限制（默认 900）")
+  .option("--force", "跳过安全事件数上限限制")
   .action(async (options: {
     source?: string;
     project?: string;
@@ -194,7 +207,11 @@ program.command("import")
     resume: boolean;
     noProject?: boolean;
     targetProject?: string;
+    maxEvents?: string;
+    force?: boolean;
   }) => {
+    const maxEvents = options.maxEvents ? parseInt(options.maxEvents, 10) : undefined;
+    const force = Boolean(options.force);
     if (!options.source || (!options.workspace && !options.project) || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -206,6 +223,8 @@ program.command("import")
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
           ...(provider ? { initialProvider: provider } : {}),
           resetCache: shouldResetCache(),
+          ...(maxEvents ? { maxEvents } : {}),
+          ...(force ? { force } : {}),
         }));
         await instance.waitUntilExit();
         return;
@@ -252,6 +271,8 @@ program.command("import")
       resume: options.resume,
       noProject: Boolean(options.noProject),
       targetProjectId,
+      ...(maxEvents ? { maxEvents } : {}),
+      ...(force ? { force } : {}),
     });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
     print(result);
@@ -265,7 +286,11 @@ program.command("replace")
   .option("--dry-run", "预演运行")
   .option("--yes", "自动确认")
   .option("--non-interactive", "非交互模式")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
+  .option("--max-events <count>", "单次操作安全事件数限制（默认 900）")
+  .option("--force", "跳过安全事件数上限限制")
+  .action(async (options: { source?: string; workspace?: string; thread: string[]; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; maxEvents?: string; force?: boolean }) => {
+    const maxEvents = options.maxEvents ? parseInt(options.maxEvents, 10) : undefined;
+    const force = Boolean(options.force);
     if (!options.source || !options.workspace || options.thread.length === 0) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -275,6 +300,8 @@ program.command("replace")
           ...(source ? { initialSource: source } : {}),
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
           resetCache: shouldResetCache(),
+          ...(maxEvents ? { maxEvents } : {}),
+          ...(force ? { force } : {}),
         }));
         await instance.waitUntilExit();
         return;
@@ -293,7 +320,12 @@ program.command("replace")
     });
     const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace! }) })));
     const paths = resolveTargetPaths(globalOverrides());
-    const result = await replaceConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
+    const result = await replaceConversations(loaded, paths, {
+      ...globalOverrides(),
+      dryRun: Boolean(options.dryRun),
+      ...(maxEvents ? { maxEvents } : {}),
+      ...(force ? { force } : {}),
+    });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "replaced"));
     print(result);
     if (result.hasConflicts) process.exitCode = 7;
@@ -309,7 +341,11 @@ program.command("sync")
   .option("--dry-run", "预演运行")
   .option("--yes", "自动确认")
   .option("--non-interactive")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
+  .option("--max-events <count>", "单次操作安全事件数限制（默认 900）")
+  .option("--force", "跳过安全事件数上限限制")
+  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; maxEvents?: string; force?: boolean }) => {
+    const maxEvents = options.maxEvents ? parseInt(options.maxEvents, 10) : undefined;
+    const force = Boolean(options.force);
     if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -321,6 +357,8 @@ program.command("sync")
           ...(options.workspace ? { initialWorkspace: options.workspace } : {}),
           ...(provider ? { initialProvider: provider } : {}),
           resetCache: shouldResetCache(),
+          ...(maxEvents ? { maxEvents } : {}),
+          ...(force ? { force } : {}),
         }));
         await instance.waitUntilExit();
         return;
@@ -348,7 +386,12 @@ program.command("sync")
     const eligible = options.all
       ? (await Promise.all(loaded.map(async (selection) => ({ selection, preview: await inspectConversationSync(selection.conversation, paths) })))).filter((item) => item.preview.previouslyImported).map((item) => item.selection)
       : loaded;
-    const result = await syncConversations(eligible, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun) });
+    const result = await syncConversations(eligible, paths, {
+      ...globalOverrides(),
+      dryRun: Boolean(options.dryRun),
+      ...(maxEvents ? { maxEvents } : {}),
+      ...(force ? { force } : {}),
+    });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "synced"));
     print(result);
     if (result.hasConflicts) process.exitCode = 7;

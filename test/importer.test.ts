@@ -139,6 +139,20 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
       { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
     expect(eventCount(paths.dbPath)).toBe(0);
+
+    const forcedResult = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
+      paths,
+      { dryRun: true, resume: true, force: true },
+    );
+    expect(forcedResult.status).toBe("dry-run");
+
+    const customLimitResult = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
+      paths,
+      { dryRun: true, resume: true, maxEvents: 5000 },
+    );
+    expect(customLimitResult.status).toBe("dry-run");
   });
 
   it("rejects new writes while T3 projections are behind", async () => {

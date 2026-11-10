@@ -29,6 +29,7 @@ import {
   materializeAssets,
   planThread,
   projectionBacklog,
+  resolveSafeEventLimit,
   type PlannedThread,
 } from "./importer.js";
 
@@ -36,6 +37,8 @@ export interface SyncOptions extends TargetOverrides {
   dryRun: boolean;
   /** Internal TUI bridge: a preceding import in this process created the backlog. */
   allowProjectionBacklog?: boolean;
+  maxEvents?: number | undefined;
+  force?: boolean | undefined;
 }
 
 interface SyncPlan {
@@ -515,7 +518,8 @@ export async function syncConversations(selections: SyncSelection[], paths: Targ
       const backlog = projectionBacklog(db);
       if (backlog.backlog > 0 && !options.allowProjectionBacklog) throw safetyError(`T3 has ${backlog.backlog} unprojected event${backlog.backlog === 1 ? "" : "s"}. Open T3 and let it finish loading before synchronizing.`);
       const count = eventPlans.reduce((sum, plan) => sum + plan.planned!.events.length, 0);
-      if (count > MAX_SAFE_IMPORT_EVENTS) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. Sync fewer conversations at a time.`);
+      const safeLimit = resolveSafeEventLimit(options.maxEvents, options.force);
+      if (count > safeLimit) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${safeLimit}. Sync fewer conversations at a time, or use --force / --max-events.`);
     }
     if (options.dryRun) return { schemaVersion: 1, status: aggregate(plans.map((plan) => plan.result), true), target: paths.dbPath, migration: schema.migration, backup: null, results: plans.map((plan) => plan.result), warnings, hasConflicts: plans.some((plan) => hasConflict(plan.result.status)) };
     if (t3Plans.length > 0) backup = createBackup(db, paths);

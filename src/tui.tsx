@@ -39,6 +39,8 @@ interface TuiProps {
   initialProvider?: string;
   mode?: "auto" | "sync" | "replace";
   resetCache?: boolean;
+  maxEvents?: number;
+  force?: boolean;
 }
 
 export function helpTextForScreen(screen: Screen, searching = false): string | undefined {
@@ -151,7 +153,7 @@ export function replacementStatusText(preview: ConversationReplacePreview | unde
   return "目标丢失";
 }
 
-export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false }: TuiProps): React.JSX.Element {
+export function ImportTui({ paths, initialSource, initialWorkspace, initialProvider, mode = "auto", resetCache = false, maxEvents, force }: TuiProps): React.JSX.Element {
   const app = useApp();
   const [screen, setScreen] = useState<Screen>("preflight");
   const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
@@ -575,13 +577,24 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
               ...(provider ? { providerInstance: provider } : {}),
               noProject: targetProjectChoice.mode === "no-project",
               targetProjectId: targetProjectChoice.mode === "existing" ? targetProjectChoice.projectId : undefined,
+              ...(maxEvents ? { maxEvents } : {}),
+              ...(force ? { force } : {}),
             })
           : undefined;
         const synced = preparedSync.length
-          ? await syncConversations(preparedSync, paths, { dryRun: false, allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")) })
+          ? await syncConversations(preparedSync, paths, {
+              dryRun: false,
+              allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")),
+              ...(maxEvents ? { maxEvents } : {}),
+              ...(force ? { force } : {}),
+            })
           : undefined;
         const replaced = preparedReplacements.length
-          ? await replaceConversations(preparedReplacements, paths, { dryRun: false })
+          ? await replaceConversations(preparedReplacements, paths, {
+              dryRun: false,
+              ...(maxEvents ? { maxEvents } : {}),
+              ...(force ? { force } : {}),
+            })
           : undefined;
         const changed = Boolean(imported?.results.some((item) => item.status === "imported")) || Boolean(synced?.results.some((item) => item.status === "synced")) || Boolean(replaced?.results.some((item) => item.status === "replaced"));
         if (resetCache && changed) {
