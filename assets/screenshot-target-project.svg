@@ -35,7 +35,7 @@
   <!-- Terminal Body Content -->
   <g transform="translate(24, 62)" class="term-text">
     <!-- Header info -->
-    <text x="0" y="0" class="cyan">t3-import · T3 Code 对话导入工具 <tspan class="dim">（Erico：中文汉化与本地适配版）</tspan></text>
+    <text x="0" y="0" class="cyan">t3-import · T3 Code 对话导入工具 <tspan class="dim">（中文汉化与本地适配版）</tspan></text>
     <text x="0" y="24" class="dim">目标数据库：~/.t3/userdata/statev2.sqlite</text>
 
     <!-- Target project title -->
@@ -46,19 +46,19 @@
     <g transform="translate(0, 114)">
       <!-- Option 1: Default Auto -->
       <text x="0" y="0" class="cursor bold">›</text>
-      <text x="14" y="0" class="highlight">📁 自动创建/归入同名项目：Campus项目（默认）</text>
+      <text x="14" y="0" class="highlight">📁 自动创建/归入同名项目：NextGen-App「项目」（默认）</text>
 
       <!-- Option 2: No Project -->
       <text x="14" y="28" class="white">📄 作为独立对话导入（无项目 / No project）</text>
 
       <!-- Option 3: Existing Project 1 -->
-      <text x="14" y="56" class="white">🔗 放入已有项目：万能学校「项目」</text>
+      <text x="14" y="56" class="white">🔗 放入已有项目：全栈工程主库「项目」</text>
 
       <!-- Option 4: Existing Project 2 -->
-      <text x="14" y="84" class="white">🔗 放入已有项目：微信双子星垃圾清理「项目」</text>
+      <text x="14" y="84" class="white">🔗 放入已有项目：云原生微服务「项目」</text>
 
       <!-- Option 5: Existing Project 3 -->
-      <text x="14" y="112" class="white">🔗 放入已有项目：触摸动画「项目」</text>
+      <text x="14" y="112" class="white">🔗 放入已有项目：跨平台客户端「项目」</text>
     </g>
 
     <!-- Bottom Help Text -->

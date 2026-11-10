@@ -15,7 +15,7 @@
 ### 💡 核心特性
 
 - **📁 项目文件夹与会话大标题深度适配**：
-  - 自动读取 Codex 数据库与全局配置，精准还原用户自定义的会话大标题（如 `Compose Android - 软件图标`）与项目文件夹（如 `📁 Campus项目`），告别截断首句。
+  - 自动读取 Codex 数据库与全局配置，精准还原用户自定义的会话大标题（如 `React 19 核心架构重构`）与项目文件夹（如 `📁 NextGen-App「项目」`），告别截断首句。
 - **🎯 自由选择导入目标（拒绝机器盲目猜测）**：
   - **自动同名项目**：默认自动创建或归入同名 T3 项目，整洁规整。
   - **独立对话（无项目）**：将选中的对话直接作为独立会话导入左侧列表。
@@ -79,13 +79,13 @@ t3-import --help
 t3-import import --help
 
 # 导入指定项目下的指定会话
-t3-import import --source codex --project "Campus项目" --thread <thread-id> --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --thread <thread-id> --yes --non-interactive
 
 # 导入为独立对话（无项目 / No project）
-t3-import import --source codex --project "Campus项目" --all --no-project --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --all --no-project --yes --non-interactive
 
 # 导入到指定的已有 T3 项目（支持项目名称或 UUID）
-t3-import import --source codex --project "Campus项目" --all --target-project "万能学校「项目」" --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --all --target-project "全栈工程主库「项目」" --yes --non-interactive
 
 # 同步已导入会话的新增轮次
 t3-import sync --source codex --workspace /path/to/project --all --yes --non-interactive
@@ -116,7 +116,7 @@ t3-import cache reset --yes
 ### 💡 Key Features
 
 - **📁 Project Folders & Exact Titles**:
-  - Automatically loads Codex sqlite metadata and configuration to restore custom conversation titles (e.g. `Compose Android - App Icon`) and user-defined project folders (`📁 Campus Project`), avoiding truncated opening prompts.
+  - Automatically loads Codex sqlite metadata and configuration to restore custom conversation titles (e.g. `React 19 Server Components Architecture`) and user-defined project folders (`📁 NextGen-App`), avoiding truncated opening prompts.
 - **🎯 Flexible Target Project Routing**:
   - **Auto Project (Default)**: Automatically creates or links to the matching project folder.
   - **Independent Conversations (No project)**: Imports threads directly into T3's general chat sidebar without creating project containers.
@@ -176,13 +176,13 @@ All capabilities can also run headlessly:
 
 ```bash
 # Import a specific thread by project name
-t3-import import --source codex --project "Campus Project" --thread <thread-id> --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --thread <thread-id> --yes --non-interactive
 
 # Import as independent conversations (No project)
-t3-import import --source codex --project "Campus Project" --all --no-project --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --all --no-project --yes --non-interactive
 
 # Import into an existing T3 project (by title or UUID)
-t3-import import --source codex --project "Campus Project" --all --target-project "My Workspace" --yes --non-interactive
+t3-import import --source codex --project "NextGen-App" --all --target-project "Core Engineering Library" --yes --non-interactive
 
 # Synchronize newly settled turns for previously imported conversations
 t3-import sync --source codex --workspace /path/to/project --all --yes --non-interactive

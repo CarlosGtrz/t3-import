@@ -36,38 +36,38 @@
   <!-- Terminal Body Content -->
   <g transform="translate(24, 62)" class="term-text">
     <!-- Header info -->
-    <text x="0" y="0" class="cyan">t3-import · T3 Code 对话导入工具 <tspan class="dim">（Erico：中文汉化与本地适配版）</tspan></text>
+    <text x="0" y="0" class="cyan">t3-import · T3 Code 对话导入工具 <tspan class="dim">（中文汉化与本地适配版）</tspan></text>
     <text x="0" y="24" class="dim">目标数据库：~/.t3/userdata/statev2.sqlite</text>
 
     <!-- Project group info -->
-    <text x="0" y="58" class="white bold">选择要导入的会话 — 📁 Campus项目</text>
+    <text x="0" y="58" class="white bold">选择要导入的会话 — 📁 NextGen-App「项目」</text>
     
     <text x="0" y="82">
       <tspan class="dim">显示模式：</tspan><tspan class="white">大标题（默认）</tspan> <tspan class="dim">(按 'v' 切换)</tspan>
-      <tspan dx="20" class="yellow">📁 [已折叠 11 个已归档会话 · 按 'h' 键展开]</tspan>
+      <tspan dx="20" class="yellow">📁 [已折叠 8 个已归档会话 · 按 'h' 键展开]</tspan>
     </text>
 
     <!-- Conversation list -->
     <g transform="translate(0, 114)">
       <!-- Item 1: Active Cursor & Selected -->
       <text x="0" y="0" class="cursor bold">›</text>
-      <text x="14" y="0" class="selected">◉  Compose Android - 软件图标</text>
+      <text x="14" y="0" class="selected">◉  React 19 核心架构与服务端组件重构</text>
       <text x="450" y="0" class="cyan">[新会话]</text>
 
       <!-- Item 2: Selected -->
-      <text x="14" y="26" class="selected">◉  校园控制台 - 数据管理与导出功能</text>
+      <text x="14" y="26" class="selected">◉  OAuth 2.1 鉴权与 RBAC 权限体系设计</text>
       <text x="450" y="26" class="cyan">[新会话]</text>
 
       <!-- Item 3: Unselected -->
-      <text x="14" y="52" class="white">○  跨端组件库构建与动态动画测试</text>
+      <text x="14" y="52" class="white">○  高性能流式响应与全局缓存优化方案</text>
       <text x="450" y="52" class="cyan">[新会话]</text>
 
       <!-- Item 4: Unselected -->
-      <text x="14" y="78" class="white">○  消息推送通道服务集成架构讨论</text>
+      <text x="14" y="78" class="white">○  微服务网关限流与熔断策略演练</text>
       <text x="450" y="78" class="gray">[已是最新]</text>
 
       <!-- Item 5: Unselected -->
-      <text x="14" y="104" class="white">○  学生信息卡片视图重构方案</text>
+      <text x="14" y="104" class="white">○  暗黑主题自适应配色系统实现</text>
       <text x="450" y="104" class="green">[3 个新轮次]</text>
     </g>
 
