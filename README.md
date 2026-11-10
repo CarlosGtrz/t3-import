@@ -1,141 +1,205 @@
 # t3-import
 
-`t3-import` is an independent, local-only CLI for importing Codex and Claude Code conversation history into [T3 Code](https://github.com/pingdotgg/t3code). It writes canonical orchestration events while T3 is closed; T3 rebuilds its own projections on the next launch. The original provider session is bound so the current branch can resume when the source history is still available.
+**Codex 与 Claude Code 对话历史导入 T3 Code 本地专业工具**  
+*A professional local CLI/TUI to import, synchronize, and migrate Codex & Claude Code conversation histories into [T3 Code](https://github.com/pingdotgg/t3code).*
 
-Compatibility is intentionally explicit: **T3 migrations 40–53**, Node.js 22 or newer, and local files only. Unknown T3 schemas fail closed.
+---
 
-## How it works
+[简体中文](#简体中文) | [English](#english)
 
-`t3-import` reads local Codex conversations through `codex app-server` and Codex rollout JSONL files. It reads Claude Code sessions from the JSONL files under `~/.claude/projects/`. The source data is normalized into conversations, turns, messages, tool activity, plans, usage, and supported image attachments.
+---
 
-To keep T3 startup bounded, imports preserve every message, turn boundary, plan, image, error or approval, context compaction, and resume binding while compacting repetitive activity telemetry. Context-window snapshots are omitted, and long turns retain the latest visible reasoning summary plus a representative significant tool activity. The importer rejects any write that would exceed T3's safe one-launch projection budget.
+<a id="简体中文"></a>
+## 简体中文
 
-With T3 Code closed, the importer validates the local database against the supported migration profiles and creates a verified backup. It then appends canonical events to `orchestration_events` and adds provider-session bindings for conversations that can be resumed. It does not modify T3's projection tables: T3 Code rebuilds them from the imported events the next time it starts. After a successful write, the importer also backs up and resets T3's rebuildable IndexedDB origin cache so stale task snapshots cannot hide newly imported history.
+### 💡 核心特性
 
-After an initial import, `t3-import` can append newly settled Codex turns and newly settled turns from linear Claude conversations. Completed, interrupted, and failed turns are preserved; only genuinely active or indeterminate turns are ignored during synchronization. It verifies that the imported checkpoint is still an exact prefix, adopts exact turns already created by resuming through T3, and never replaces edited or deleted history. Claude sessions with multiple non-sidechain leaves after deterministic compaction and retry normalization are reported as conflicts rather than guessed.
+- **📁 项目文件夹与会话大标题深度适配**：
+  - 自动读取 Codex 数据库与全局配置，精准还原用户自定义的会话大标题（如 `Compose Android - 软件图标`）与项目文件夹（如 `📁 Campus项目`），告别截断首句。
+- **🎯 自由选择导入目标（拒绝机器盲目猜测）**：
+  - **自动同名项目**：默认自动创建或归入同名 T3 项目，整洁规整。
+  - **独立对话（无项目）**：将选中的对话直接作为独立会话导入左侧列表。
+  - **放入已有项目**：动态读取当前 T3 现存活跃项目列表，一键精准归类。
+- **📦 已归档会话智能折叠**：
+  - 列表默认折叠已归档历史会话，按 `h` 键可随时展开/收起；全选快捷键 `a` 仅对可见项生效。
+- **⚡ 超大对话流式引擎**：
+  - 采用流式 SHA-256 指纹计算与分批处理，安全支持 >500MB+ 巨型对话，无内存溢出风险。
+- **🔄 全生命周期管理**：
+  - 支持初次导入（`import`）、增量续聊追加（`sync`）以及旧任务整聊无损替换（`replace`）。
+- **🛡️ 严格的数据安全防线**：
+  - 仅在 T3 关闭状态下执行；每次操作前自动创建 SQLite 校验快照备份，安全重置 IndexedDB 缓存。
 
-If an imported task has diverged or was created by an older importer, `replace` can create a fresh, complete canonical task from the provider transcript. The old task is soft-deleted with a `thread.deleted` event, while its immutable event stream remains available for audit. The provider instance, model, resume cursor, project, and synchronization identity move to the new task atomically. When deterministic normalization reduces a previously fragmented Claude session to one leaf, replacement consolidates every still-visible imported fragment of that session into the new task. Replacement is available for Codex and for Claude sessions with one normalized non-sidechain leaf, and it refuses to snapshot an active provider turn.
+---
 
-## Install and run
+### 🖥️ 界面预览
 
-> [!WARNING]
-> `t3-import` is experimental and writes directly to T3 Code's local database. Future T3 Code versions may be incompatible even if the tool works today. Close T3 Code before importing, keep the generated backup, and use this tool at your own risk.
+#### 1. 会话选择界面（支持大标题、项目文件夹与折叠归档）
+![t3-import 会话选择界面](assets/screenshot-threads.png)
 
-```text
+#### 2. 导入目标选择（支持自动项目、无项目独立对话、归入已有项目）
+![t3-import 导入目标选择界面](assets/screenshot-target-project.png)
+
+---
+
+### 🚀 快速开始
+
+#### 安装与启动
+
+```bash
+# 全局安装
 npm install --global @carlosgtrz/t3-import
+
+# 启动交互式终端界面（推荐）
 t3-import
 ```
 
-Running without a command opens the interactive TUI. It guides you through source, workspace, provider instance, conversation selection, review, confirmation, and results, then offers to start T3 Code with Yes selected by default.
+#### TUI 常用快捷键
 
-## Interactive demo
+| 按键 | 说明 |
+| :--- | :--- |
+| `↑` / `↓` 或 `j` / `k` | 上下移动光标 |
+| `Space` (空格) | 选中 / 取消选中当前会话 |
+| `a` | 全选 / 取消全选当前可见会话 |
+| `h` | 展开 / 折叠已归档会话 |
+| `v` | 切换显示模式（大标题 / 详细时间 / 物理路径） |
+| `/` | 开启关键词即时搜索过滤 |
+| `Enter` | 确认进入下一步 |
+| `Esc` | 返回上一步 |
+| `q` | 退出程序 |
 
-The example below installs the package, launches `t3-import` without parameters, selects Codex, and imports two simulated conversations into T3 Code.
+---
 
-![Animated t3-import interactive Codex import](https://raw.githubusercontent.com/CarlosGtrz/t3-import/main/assets/t3-import-tui-demo.gif)
+### ⌨️ CLI 命令行模式
 
-Non-interactive examples:
+除交互式 TUI 外，所有操作均可通过 CLI 非交互式执行：
 
-```text
-t3-import list --source codex --workspace C:\src\my-project
-t3-import show --source claude --thread <session-id>
-t3-import import --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
-t3-import import --source claude --workspace C:\src\my-project --all --since 2026-01-01 --yes --non-interactive
-t3-import sync --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
-t3-import sync --source claude --workspace C:\src\my-project --all --yes --non-interactive
-t3-import replace --source codex --workspace C:\src\my-project --thread <thread-id> --yes --non-interactive
+```bash
+# 查看帮助
+t3-import --help
+t3-import import --help
+
+# 导入指定项目下的指定会话
+t3-import import --source codex --project "Campus项目" --thread <thread-id> --yes --non-interactive
+
+# 导入为独立对话（无项目 / No project）
+t3-import import --source codex --project "Campus项目" --all --no-project --yes --non-interactive
+
+# 导入到指定的已有 T3 项目（支持项目名称或 UUID）
+t3-import import --source codex --project "Campus项目" --all --target-project "万能学校「项目」" --yes --non-interactive
+
+# 同步已导入会话的新增轮次
+t3-import sync --source codex --workspace /path/to/project --all --yes --non-interactive
+
+# 使用最新源记录无损替换旧任务
+t3-import replace --source codex --workspace /path/to/project --thread <thread-id> --yes --non-interactive
+
+# 运行只读环境诊断
+t3-import doctor
+
+# 独立备份并重置 T3 UI 缓存
 t3-import cache reset --yes
-t3-import doctor --json
 ```
 
-Global target options can be placed before or after a subcommand:
+---
 
-```text
---t3-home <path>
---db <state.sqlite>
---attachments-dir <path>
---provider-instance <id>
---json
---no-color
---no-cache-reset            Keep the existing IndexedDB cache after writes
+### ⚙️ 架构与数据安全
+
+- **离线安全**：工具纯本地离线运行，仅在 T3 Code 关闭时操作本地 SQLite 数据库。
+- **事件驱动写入**：严格遵循 T3 Code 事件溯源机制，仅追加 `orchestration_events` 标准事件流与会话运行时绑定，不直接篡改投影表，在 T3 启动时由官方引擎安全重建投影。
+- **架构兼容**：全面适配 T3 Code V2 数据库架构（`~/.t3/userdata/statev2.sqlite`）与历史迁移。
+
+---
+
+<a id="english"></a>
+## English
+
+### 💡 Key Features
+
+- **📁 Project Folders & Exact Titles**:
+  - Automatically loads Codex sqlite metadata and configuration to restore custom conversation titles (e.g. `Compose Android - App Icon`) and user-defined project folders (`📁 Campus Project`), avoiding truncated opening prompts.
+- **🎯 Flexible Target Project Routing**:
+  - **Auto Project (Default)**: Automatically creates or links to the matching project folder.
+  - **Independent Conversations (No project)**: Imports threads directly into T3's general chat sidebar without creating project containers.
+  - **Assign to Existing Project**: Dynamically lists active T3 projects to place conversations into existing workspaces without machine guesswork.
+- **📦 Collapsible Archived Threads**:
+  - Archived conversations are collapsed by default to keep the workspace clean; toggle with `h`. Bulk select (`a`) operates only on visible rows.
+- **⚡ Large Conversation Streaming Engine**:
+  - Re-architected with streaming SHA-256 checksums to safely process >500MB+ JSONL files without Node.js V8 memory exhaustion.
+- **🔄 Full Lifecycle Support**:
+  - Full support for initial import (`import`), appending settled turns (`sync`), and complete canonical task replacement (`replace`).
+- **🛡️ Rock-Solid Data Safety**:
+  - Enforces closed-T3 safety; creates verified timestamped SQLite backups before writing, with safe IndexedDB cache reset.
+
+---
+
+### 🖥️ Screenshots
+
+#### 1. Conversation Selection (Title display, project folders, collapsed archives)
+![Conversation Selection Screen](assets/screenshot-threads.png)
+
+#### 2. Target Project Selection (Auto project, No project, or existing projects)
+![Target Project Selection Screen](assets/screenshot-target-project.png)
+
+---
+
+### 🚀 Quick Start
+
+#### Installation & Launch
+
+```bash
+# Global install
+npm install --global @carlosgtrz/t3-import
+
+# Launch interactive TUI (Recommended)
+t3-import
 ```
 
-Import options:
+#### TUI Keyboard Shortcuts
 
-```text
---thread <id>             Repeatable; mutually exclusive with --all
---all
---since <ISO date>
---include-incomplete
---dry-run
---yes
---non-interactive
---no-resume
+| Key | Action |
+| :--- | :--- |
+| `↑` / `↓` or `j` / `k` | Navigate items |
+| `Space` | Select / deselect conversation |
+| `a` | Select / deselect all visible conversations |
+| `h` | Toggle archived conversations (expand / collapse) |
+| `v` | Switch display mode (Title / Timestamp / Path) |
+| `/` | Search filter |
+| `Enter` | Confirm and continue |
+| `Esc` | Go back |
+| `q` | Quit |
+
+---
+
+### ⌨️ CLI Usage
+
+All capabilities can also run headlessly:
+
+```bash
+# Import a specific thread by project name
+t3-import import --source codex --project "Campus Project" --thread <thread-id> --yes --non-interactive
+
+# Import as independent conversations (No project)
+t3-import import --source codex --project "Campus Project" --all --no-project --yes --non-interactive
+
+# Import into an existing T3 project (by title or UUID)
+t3-import import --source codex --project "Campus Project" --all --target-project "My Workspace" --yes --non-interactive
+
+# Synchronize newly settled turns for previously imported conversations
+t3-import sync --source codex --workspace /path/to/project --all --yes --non-interactive
+
+# Replace an existing task with the complete provider transcript
+t3-import replace --source codex --workspace /path/to/project --thread <thread-id> --yes --non-interactive
+
+# Non-destructive diagnostics
+t3-import doctor
+
+# Reset IndexedDB cache safely
+t3-import cache reset --yes
 ```
 
-Sync options:
+---
 
-```text
---thread <id>             Repeatable; mutually exclusive with --all
---all                     Sync previously imported conversations only
---since <ISO date>
---dry-run
---yes
---non-interactive
-```
+## 鸣谢 / Acknowledgements
 
-Replace options:
-
-```text
---thread <id>             Repeatable and required for non-interactive use
---dry-run
---yes
---non-interactive
-```
-
-The normal TUI labels conversations as new, syncable, up to date, active-only, or conflicted. Interrupted and failed additions are called out in the status text, and ignored active turns are shown without enabling them for synchronization. A history conflict is labeled `history changed · replace available` when it can be replaced. Replacement choices cannot be mixed with imports or ordinary syncs. The dedicated `sync` and `replace` commands open focused TUI flows when required arguments are omitted on a terminal.
-
-When `--json` is active, stdout contains one versioned JSON value and diagnostics use stderr. Exit codes are `2` usage, `3` T3 compatibility, `4` live-T3 safety, `5` source parsing, `6` write failure, and `7` reconciliation conflict.
-
-## Safety and storage
-
-- Close T3 before every real import. There is deliberately no force bypass.
-- Every write creates and verifies a timestamped SQLite backup under `<state-dir>/t3-import-backups/`.
-- Successful imports, syncs, and replacements reset T3's rebuildable IndexedDB origin cache by default. The cache is moved aside, copied and verified under the same backup directory before removal; use `--no-cache-reset` to opt out.
-- The importer appends `orchestration_events` and writes resumable rows to `provider_session_runtime`; it never writes `projection_*` tables or `projection_state`.
-- Imports are idempotent. A second import reports `already-imported`. `sync` only appends completed, interrupted, or failed turns after an unchanged checkpoint, and repeated syncs are no-ops. `replace` promotes one complete new task as the sole synchronization target and soft-deletes the old canonical task; repeating it against that unchanged replacement is also a no-op.
-- New imports are rejected when T3 has an existing projection backlog or when the compact event plan exceeds the safe 900-event startup budget.
-- Supported local image attachments are copied atomically. Remote images are referenced but not downloaded.
-- An external ledger is stored in the platform application-data directory. Event IDs provide the fallback idempotency check if the ledger is missing.
-
-`doctor` reports database compatibility and integrity, live/stale runtime state, discovered IndexedDB caches, source availability, and attachment staging leftovers without changing anything. `t3-import cache reset` can perform the same recoverable cache reset without importing, synchronizing, or replacing anything. Both operations require T3 to be closed.
-
-## Source behavior
-
-Codex discovery prefers the normalized `codex app-server` API and augments it with rollout JSONL; it falls back to rollout files when app-server is unavailable. Claude discovery streams project JSONL and reconstructs its UUID graph. Automatic compaction roots are reconnected through validated `logicalParentUuid` links, and unambiguous successful API-retry forks are linearized while retaining their retry activity. Genuine alternate Claude leaves that remain become separate historical T3 tasks; only the current leaf receives a resume binding.
-
-Injected system/developer/environment envelopes and encrypted reasoning blobs are excluded. Visible messages, reasoning summaries, plans, tools, usage, compaction, resolved approvals/input, and supported images are mapped to T3-compatible events.
-
-## Development
-
-The repositories under `repos/` are references and are not runtime dependencies.
-
-```text
-npm install
-npm run typecheck
-npm test
-npm run build
-npm pack
-```
-
-Compatibility is validated against pinned historical T3 commits for every migration from 40 through 53, including stable `v0.0.42` (`719a76ca1`) and nightly `v0.0.43-nightly.20260920.2031` (`adcd90858`). Earlier versions and unvalidated future migrations fail closed. The importer never upgrades a T3 database; T3 owns migrations, and existing imports can continue synchronizing after an upgrade within the supported range.
-
-`npm test` uses committed schemas generated from T3's actual migrations. The additional integration matrix runs the historical event decoders, projectors, and provider restoration services against synthetic databases:
-
-```text
-npm run test:compatibility
-```
-
-This requires Git, tar, Node.js 22.21.1 or newer, network access for isolated development dependencies, and a T3 checkout containing the pinned commits at `repos/t3code` (override with `T3_REFERENCE_REPO`). It prepares source snapshots under `artifacts/compatibility`, exercises both providers at all fourteen migrations and every upgrade to 53, and writes a JSON result report. Provider processes are replaced with controlled test adapters; no paid provider work runs. The installed T3 application and live database are not used.
-
-See [compatibility validation](https://github.com/CarlosGtrz/t3-import/blob/main/docs/compatibility.md) for reference commits, fixture regeneration, and the exact validation boundary.
+本项目基于 [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import) 架构进行二次开发与深度重构，扩展了 Codex 项目文件夹识别、会话大标题解析、自选目标项目归属、超大对话流式引擎以及完整中文本地化支持。  
+*This project is built upon and extended from [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import), adding Codex project folders, conversation title mapping, flexible target project routing, streaming large-file processing, and bilingual localization.*

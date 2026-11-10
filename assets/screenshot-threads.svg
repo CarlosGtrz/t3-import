@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 480" width="850" height="480">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&amp;display=swap');
+      .term-bg { fill: #0d1117; }
+      .term-header { fill: #161b22; }
+      .term-border { stroke: #30363d; stroke-width: 1; fill: none; }
+      .btn-red { fill: #ff5f56; }
+      .btn-yellow { fill: #ffbd2e; }
+      .btn-green { fill: #27c93f; }
+      .title-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #8b949e; text-anchor: middle; font-weight: 500; }
+      .term-text { font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 20px; }
+      .cyan { fill: #58a6ff; font-weight: bold; }
+      .dim { fill: #6e7681; }
+      .white { fill: #e6edf3; }
+      .bold { font-weight: bold; }
+      .yellow { fill: #d29922; }
+      .green { fill: #3fb950; }
+      .gray { fill: #8b949e; }
+      .cursor { fill: #58a6ff; }
+      .selected { fill: #58a6ff; font-weight: 500; }
+    </style>
+  </defs>
+
+  <!-- Terminal Window Background -->
+  <rect x="0" y="0" width="850" height="480" rx="10" ry="10" class="term-bg" />
+  
+  <!-- Window Header -->
+  <path d="M 0 10 Q 0 0 10 0 L 840 0 Q 850 0 850 10 L 850 36 L 0 36 Z" class="term-header" />
+  <circle cx="20" cy="18" r="6" class="btn-red" />
+  <circle cx="40" cy="18" r="6" class="btn-yellow" />
+  <circle cx="60" cy="18" r="6" class="btn-green" />
+  <text x="425" y="22" class="title-text">t3-import — 会话选择 (Conversation Selection)</text>
+  <rect x="0" y="0" width="850" height="480" rx="10" ry="10" class="term-border" />
+
+  <!-- Terminal Body Content -->
+  <g transform="translate(24, 62)" class="term-text">
+    <!-- Header info -->
+    <text x="0" y="0" class="cyan">t3-import · T3 Code 对话导入工具 <tspan class="dim">（Erico：中文汉化与本地适配版）</tspan></text>
+    <text x="0" y="24" class="dim">目标数据库：~/.t3/userdata/statev2.sqlite</text>
+
+    <!-- Project group info -->
+    <text x="0" y="58" class="white bold">选择要导入的会话 — 📁 Campus项目</text>
+    
+    <text x="0" y="82">
+      <tspan class="dim">显示模式：</tspan><tspan class="white">大标题（默认）</tspan> <tspan class="dim">(按 'v' 切换)</tspan>
+      <tspan dx="20" class="yellow">📁 [已折叠 11 个已归档会话 · 按 'h' 键展开]</tspan>
+    </text>
+
+    <!-- Conversation list -->
+    <g transform="translate(0, 114)">
+      <!-- Item 1: Active Cursor & Selected -->
+      <text x="0" y="0" class="cursor bold">›</text>
+      <text x="14" y="0" class="selected">◉  Compose Android - 软件图标</text>
+      <text x="450" y="0" class="cyan">[新会话]</text>
+
+      <!-- Item 2: Selected -->
+      <text x="14" y="26" class="selected">◉  校园控制台 - 数据管理与导出功能</text>
+      <text x="450" y="26" class="cyan">[新会话]</text>
+
+      <!-- Item 3: Unselected -->
+      <text x="14" y="52" class="white">○  跨端组件库构建与动态动画测试</text>
+      <text x="450" y="52" class="cyan">[新会话]</text>
+
+      <!-- Item 4: Unselected -->
+      <text x="14" y="78" class="white">○  消息推送通道服务集成架构讨论</text>
+      <text x="450" y="78" class="gray">[已是最新]</text>
+
+      <!-- Item 5: Unselected -->
+      <text x="14" y="104" class="white">○  学生信息卡片视图重构方案</text>
+      <text x="450" y="104" class="green">[3 个新轮次]</text>
+    </g>
+
+    <!-- Bottom Help Text -->
+    <line x1="0" y1="260" x2="802" y2="260" stroke="#21262d" stroke-width="1" />
+    <text x="0" y="286" class="dim">↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索  v 切换显示  Enter 继续  Esc 返回  q 退出</text>
+    <text x="0" y="310" class="dim">原作者: CarlosGtrz · 本地适配与中文增强: Erico</text>
+  </g>
+</svg>
