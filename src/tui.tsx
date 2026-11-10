@@ -17,7 +17,7 @@ import type {
 } from "./core/types.js";
 import { sourceAdapter } from "./sources/index.js";
 import { inferCurrentWorkspace } from "./sources/codex.js";
-import { compactThreadForImport, importConversations, listActiveT3Projects, type T3ProjectInfo } from "./target/importer.js";
+import { compactThreadForImport, importConversations, listActiveT3Projects, resolveSafeEventLimit, type T3ProjectInfo } from "./target/importer.js";
 import { fastCheckImportedSessionIds, inspectConversationSync, syncConversations } from "./target/sync.js";
 import { listProviderInstances } from "./target/config.js";
 import { inspectRuntime, type RuntimeState } from "./target/schema.js";
@@ -48,7 +48,7 @@ export function helpTextForScreen(screen: Screen, searching = false): string | u
   if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索  v 切换显示模式  Enter 继续  Esc 返回  q 退出";
   if (screen === "workspace") return "↑/↓ 或 j/k 移动  Enter 选择  Tab 切换分组模式  Esc 返回/退出  q 退出";
   if (screen === "source" || screen === "provider" || screen === "target-project") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
-  if (screen === "review") return "Enter 确认执行  Esc 返回  q 退出";
+  if (screen === "review") return "Enter 确认执行  y/n 或 f 切换强制模式  Esc 返回  q 退出";
   if (screen === "result") return "↑/↓ 或 j/k 移动  Enter 确认  q 退出";
   return undefined;
 }
@@ -86,12 +86,14 @@ export function ReplacementReview({
   previews,
   counts,
   resetCache,
+  forceMode,
 }: {
   workspace: string | undefined;
   selections: ReplaceSelection[];
   previews: Map<string, ConversationReplacePreview>;
   counts: { tasks: number; turns: number; events: number; attachments: number };
   resetCache: boolean;
+  forceMode?: boolean;
 }): React.JSX.Element {
   const taskWord = "个任务";
   return <>
@@ -121,7 +123,12 @@ export function ReplacementReview({
       <Text>  {resetCache ? "• 备份并重置 T3 UI 缓存" : "• 保留 T3 现有 UI 缓存 (--no-cache-reset)"}</Text>
     </Box>
     <Text color="yellow">【注意】T3 Code 必须保持关闭状态。</Text>
-    <Text bold>按 Enter 确认替换，按 Esc 取消。</Text>
+    {forceMode ? (
+      <Text color="magenta">【强制模式】已开启：跳过 900 安全事件数限制（按 'n' 或 'f' 键关闭）</Text>
+    ) : (
+      <Text dimColor>【提示】如遇到事件数超限，可按 'y' 或 'f' 开启强制跳过限制（按 'n' 关闭）</Text>
+    )}
+    <Text bold>按 Enter 确认替换，按 y/n 或 f 切换强制模式，按 Esc 取消。</Text>
   </>;
 }
 
@@ -185,6 +192,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   const [error, setError] = useState<string>();
   const [launchError, setLaunchError] = useState<string>();
   const [cacheWarning, setCacheWarning] = useState<string>();
+  const [forceOverride, setForceOverride] = useState<boolean>(Boolean(force));
   const checkingStatuses = pendingStatuses > 0;
 
   const navigate = useCallback((next: Screen) => {
@@ -317,6 +325,29 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     counts.attachments += preview?.attachments ?? 0;
     return counts;
   }, { tasks: 0, turns: 0, events: 0, attachments: 0 }), [preparedReplacements, replacePreviews]);
+
+  const estimatedImportEvents = useMemo(() => {
+    return preparedImports.reduce((total, selection) => {
+      let count = 0;
+      for (const sourceThread of selection.conversation.threads) {
+        const thread = compactThreadForImport(sourceThread);
+        count += 1 + (thread.currentBranch ? 0 : 1);
+        for (const turn of thread.turns) {
+          count += 4;
+          count += turn.assistant.length;
+          count += turn.activities.length;
+          count += turn.plans.length;
+        }
+      }
+      return total + count;
+    }, 0);
+  }, [preparedImports]);
+
+  const totalEstimatedEvents = useMemo(() => {
+    if (preparedReplacements.length) return replacementPreview.events;
+    if (preparedImports.length) return estimatedImportEvents;
+    return syncPreview.turns * 5;
+  }, [estimatedImportEvents, preparedImports.length, preparedReplacements.length, replacementPreview.events, syncPreview.turns]);
 
   const checkRuntime = useCallback(() => {
     setScreenHistory([]);
@@ -567,6 +598,20 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         return;
       }
     }
+    if (screen === "review") {
+      if (input === "f" || input === "F") {
+        setForceOverride((v) => !v);
+        return;
+      }
+      if (input === "y" || input === "Y") {
+        setForceOverride(true);
+        return;
+      }
+      if (input === "n" || input === "N") {
+        setForceOverride(false);
+        return;
+      }
+    }
     if (screen === "review" && key.return) {
       setScreen("running");
       const run = async () => {
@@ -578,7 +623,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
               noProject: targetProjectChoice.mode === "no-project",
               targetProjectId: targetProjectChoice.mode === "existing" ? targetProjectChoice.projectId : undefined,
               ...(maxEvents ? { maxEvents } : {}),
-              ...(force ? { force } : {}),
+              force: forceOverride,
             })
           : undefined;
         const synced = preparedSync.length
@@ -586,14 +631,14 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
               dryRun: false,
               allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")),
               ...(maxEvents ? { maxEvents } : {}),
-              ...(force ? { force } : {}),
+              force: forceOverride,
             })
           : undefined;
         const replaced = preparedReplacements.length
           ? await replaceConversations(preparedReplacements, paths, {
               dryRun: false,
               ...(maxEvents ? { maxEvents } : {}),
-              ...(force ? { force } : {}),
+              force: forceOverride,
             })
           : undefined;
         const changed = Boolean(imported?.results.some((item) => item.status === "imported")) || Boolean(synced?.results.some((item) => item.status === "synced")) || Boolean(replaced?.results.some((item) => item.status === "replaced"));
@@ -688,7 +733,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       </>}
       {screen === "review" && <>
         {preparedReplacements.length ? <>
-          <ReplacementReview workspace={selectedProject ?? workspace} selections={preparedReplacements} previews={replacePreviews} counts={replacementPreview} resetCache={resetCache} />
+          <ReplacementReview workspace={selectedProject ?? workspace} selections={preparedReplacements} previews={replacePreviews} counts={replacementPreview} resetCache={resetCache} forceMode={forceOverride} />
         </> : <>
           <Text bold>确认导入变更</Text>
           <Text>来源：{source} · 分组/项目：{selectedProject ?? workspace}</Text>
@@ -700,7 +745,14 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
           {preparedImports.length ? <Text>目标 Provider 实例：{provider}</Text> : null}
           {resetCache ? <Text>T3 IndexedDB 缓存：操作完成后自动备份并重置缓存</Text> : <Text>T3 IndexedDB 缓存：保留现有缓存</Text>}
           <Text color="yellow">【提示】操作前已自动创建数据库安全快照备份。</Text>
-          <Text bold>按 Enter 开始执行导入，按 Esc 返回上一步。</Text>
+          {totalEstimatedEvents > 900 && !forceOverride ? (
+            <Text color="yellow">【提示】预计事件总数（约 {totalEstimatedEvents} 个）超过单次安全上限 900。按 'y' 或 'f' 键可开启强制模式跳过限制。</Text>
+          ) : forceOverride ? (
+            <Text color="magenta">【强制模式】已开启：跳过 900 安全事件数限制（按 'n' 或 'f' 键关闭）。</Text>
+          ) : (
+            <Text dimColor>【提示】如遇到事件数超限，可按 'y' 或 'f' 开启强制跳过限制（按 'n' 关闭）。</Text>
+          )}
+          <Text bold>按 Enter 开始执行导入，按 y/n 或 f 切换强制模式，按 Esc 返回上一步。</Text>
         </>}
       </>}
       {screen === "running" && <Text>{preparedImports.length || preparedSync.length || preparedReplacements.length ? "正在备份数据库并导入会话数据，请稍候…" : "正在加载选中的会话数据，请稍候…"}</Text>}

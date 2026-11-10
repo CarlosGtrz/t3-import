@@ -53,7 +53,7 @@ describe("interactive TUI", () => {
     expect(helpTextForScreen("provider")).not.toContain("/ 搜索");
     expect(helpTextForScreen("threads")).toContain("空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索");
     expect(helpTextForScreen("threads", true)).toBe("输入关键字搜索  Backspace 删除  Enter 确认  Esc 取消");
-    expect(helpTextForScreen("review")).toBe("Enter 确认执行  Esc 返回  q 退出");
+    expect(helpTextForScreen("review")).toBe("Enter 确认执行  y/n 或 f 切换强制模式  Esc 返回  q 退出");
     expect(helpTextForScreen("result")).toBe("↑/↓ 或 j/k 移动  Enter 确认  q 退出");
     expect(helpTextForScreen("running")).toBeUndefined();
   });
@@ -129,7 +129,8 @@ describe("interactive TUI", () => {
     expect(frame).toContain("确认后，t3-import 将自动执行：");
     expect(frame).toContain("创建已校验的 T3 数据库安全备份");
     expect(frame).toContain("备份并重置 T3 UI 缓存");
-    expect(frame).toContain("按 Enter 确认替换，按 Esc 取消。");
+    expect(frame).toContain("按 Enter 确认替换，按 y/n 或 f 切换强制模式，按 Esc 取消。");
+    expect(frame).toContain("【提示】如遇到事件数超限，可按 'y' 或 'f' 开启强制跳过限制（按 'n' 关闭）");
     expect(frame).not.toContain("新增任务数：");
     expect(frame).not.toContain("同步任务数：");
     tui.unmount();
