@@ -5,21 +5,30 @@ import { compatibilityError, safetyError } from "../core/errors.js";
 import { isObject, stringValue } from "../core/util.js";
 
 export const SUPPORTED_MIGRATIONS = [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53] as const;
+export const MIN_SUPPORTED_MIGRATION = 40;
 
 /** Read the current target version, including when recovering an absent ledger. */
 export function targetMigration(db: Database.Database): number {
   const row = db.prepare("SELECT COALESCE(MAX(migration_id), 0) migration FROM effect_sql_migrations").get() as { migration: number };
-  if (!SUPPORTED_MIGRATIONS.some((migration) => migration === row.migration)) {
-    throw compatibilityError(`Unsupported T3 schema migration ${row.migration}; supported migrations are 40–53.`);
+  if (row.migration < MIN_SUPPORTED_MIGRATION) {
+    throw compatibilityError(`Unsupported T3 schema migration ${row.migration}; minimum supported migration is ${MIN_SUPPORTED_MIGRATION}.`);
   }
   return row.migration;
 }
 
-const REQUIRED_COLUMNS: Record<string, string[]> = {
+const REQUIRED_COLUMNS_V1: Record<string, string[]> = {
   orchestration_events: ["sequence", "event_id", "aggregate_kind", "stream_id", "stream_version", "event_type", "occurred_at", "actor_kind", "payload_json", "metadata_json"],
   projection_projects: ["project_id", "workspace_root", "deleted_at"],
   projection_state: ["projector", "last_applied_sequence"],
   provider_session_runtime: ["thread_id", "provider_name", "provider_instance_id", "adapter_key", "runtime_mode", "status", "last_seen_at", "resume_cursor_json", "runtime_payload_json"],
+};
+
+const REQUIRED_COLUMNS_V2: Record<string, string[]> = {
+  orchestration_events: ["sequence", "event_id", "aggregate_kind", "stream_id", "stream_version", "event_type", "occurred_at", "actor_kind", "payload_json", "metadata_json"],
+  projection_projects: ["project_id", "workspace_root", "deleted_at"],
+  provider_session_runtime: ["thread_id", "provider_name", "provider_instance_id", "adapter_key", "runtime_mode", "status", "last_seen_at", "resume_cursor_json", "runtime_payload_json"],
+  orchestration_v2_projection_threads: ["thread_id", "project_id", "title", "payload_json"],
+  orchestration_v2_projection_messages: ["message_id", "thread_id", "role", "payload_json"],
 };
 
 function pidAlive(pid: number): boolean {
@@ -76,7 +85,9 @@ export function validateTargetDatabase(db: Database.Database): SchemaInfo {
   if (integrity !== "ok") throw compatibilityError(`T3 database integrity check failed: ${integrity}`);
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
   const names = new Set(tables.map((entry) => entry.name));
-  for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+  const isV2 = names.has("orchestration_v2_projection_threads") || !names.has("projection_state");
+  const required = isV2 ? REQUIRED_COLUMNS_V2 : REQUIRED_COLUMNS_V1;
+  for (const [table, columns] of Object.entries(required)) {
     if (!names.has(table)) throw compatibilityError(`Not a compatible T3 database: missing table '${table}'.`);
     const available = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((entry) => entry.name));
     for (const column of columns) if (!available.has(column)) throw compatibilityError(`Unsupported T3 schema: ${table}.${column} is missing.`);

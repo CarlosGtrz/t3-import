@@ -39,25 +39,25 @@ function sourceName(value: string): SourceName { return sourceSchema.parse(value
 
 async function confirmImport(count: number): Promise<boolean> {
   const prompt = createInterface({ input, output });
-  try { return /^(y|yes)$/iu.test((await prompt.question(`Import ${count} conversation${count === 1 ? "" : "s"} into T3? [y/N] `)).trim()); }
+  try { return /^(y|yes)$/iu.test((await prompt.question(`确认将 ${count} 个会话导入到 T3 中吗？[y/N] `)).trim()); }
   finally { prompt.close(); }
 }
 
 async function confirmSync(count: number): Promise<boolean> {
   const prompt = createInterface({ input, output });
-  try { return /^(y|yes)$/iu.test((await prompt.question(`Synchronize ${count} conversation${count === 1 ? "" : "s"} with T3? [y/N] `)).trim()); }
+  try { return /^(y|yes)$/iu.test((await prompt.question(`确认将 ${count} 个会话同步到 T3 中吗？[y/N] `)).trim()); }
   finally { prompt.close(); }
 }
 
 async function confirmReplace(count: number): Promise<boolean> {
   const prompt = createInterface({ input, output });
-  try { return /^(y|yes)$/iu.test((await prompt.question(`Replace ${count} canonical T3 task${count === 1 ? "" : "s"}? The old tasks will be soft-deleted. [y/N] `)).trim()); }
+  try { return /^(y|yes)$/iu.test((await prompt.question(`确认替换 ${count} 个 T3 任务吗？旧任务将被软删除标记。[y/N] `)).trim()); }
   finally { prompt.close(); }
 }
 
 async function confirmCacheReset(): Promise<boolean> {
   const prompt = createInterface({ input, output });
-  try { return /^(y|yes)$/iu.test((await prompt.question("Reset T3's rebuildable IndexedDB cache? A verified backup will be created. [y/N] ")).trim()); }
+  try { return /^(y|yes)$/iu.test((await prompt.question("确认重置 T3 的 IndexedDB 缓存吗？操作前会自动创建经过验证的备份。[y/N] ")).trim()); }
   finally { prompt.close(); }
 }
 
@@ -71,22 +71,22 @@ async function attachCacheReset<T extends ImportRunResult | SyncRunResult | Repl
     result.cache = await resetT3RebuildableCache(paths);
     result.warnings.push(...result.cache.warnings);
   } catch (error) {
-    result.warnings.push(`T3 data was updated, but its IndexedDB cache could not be reset: ${error instanceof Error ? error.message : String(error)}`);
+    result.warnings.push(`T3 数据已更新，但未能重置其 IndexedDB 缓存: ${error instanceof Error ? error.message : String(error)}`);
   }
   return result;
 }
 
 program
   .name("t3-import")
-  .description("Import, synchronize, and replace Codex and Claude Code conversations in T3 Code")
+  .description("将 Codex 和 Claude Code 的会话记录导入、同步并安全替换至 T3 Code 中（Erico：中文汉化）")
   .version(IMPORTER_VERSION)
-  .option("--t3-home <path>", "T3 home directory")
-  .option("--db <path>", "T3 state.sqlite path")
-  .option("--attachments-dir <path>", "T3 attachments directory")
-  .option("--provider-instance <id>", "T3 provider instance")
-  .option("--json", "write machine-readable JSON to stdout")
-  .option("--no-color", "disable color output")
-  .option("--no-cache-reset", "keep T3's existing IndexedDB cache after writes")
+  .option("--t3-home <path>", "T3 安装/数据根目录 (默认 ~/.t3)")
+  .option("--db <path>", "T3 数据库文件路径 (默认 ~/.t3/userdata/statev2.sqlite)")
+  .option("--attachments-dir <path>", "T3 附件存放目录")
+  .option("--provider-instance <id>", "目标 T3 provider 实例 ID")
+  .option("--json", "以 JSON 格式输出结果")
+  .option("--no-color", "禁用彩色终端输出")
+  .option("--no-cache-reset", "写入数据后保留 T3 现有的 IndexedDB 缓存")
   .action(async () => {
     const paths = resolveTargetPaths(globalOverrides());
     const provider = globalOverrides().providerInstance;
@@ -95,24 +95,31 @@ program
   });
 
 program.command("list")
-  .description("List source conversations")
-  .requiredOption("--source <source>", "codex or claude")
-  .option("--workspace <path>")
-  .option("--since <date>", "ISO date/time")
-  .action(async (options: { source: string; workspace?: string; since?: string }) => {
+  .description("列出源会话历史列表")
+  .requiredOption("--source <source>", "数据源: codex 或 claude")
+  .option("--project <name>", "按项目/文件夹筛选 (如: Campus项目)")
+  .option("--workspace <path>", "筛选指定工作区路径")
+  .option("--since <date>", "仅列出指定 ISO 日期之后的会话")
+  .option("--include-archived", "包含已归档的会话")
+  .action(async (options: { source: string; project?: string; workspace?: string; since?: string; includeArchived?: boolean }) => {
     const since = parseSince(options.since);
-    const summaries = await sourceAdapter(sourceName(options.source)).discover({ ...(options.workspace ? { workspace: options.workspace } : {}), ...(since ? { since } : {}) });
+    const summaries = await sourceAdapter(sourceName(options.source)).discover({
+      ...(options.project ? { project: options.project } : {}),
+      ...(options.workspace ? { workspace: options.workspace } : {}),
+      includeArchived: Boolean(options.includeArchived),
+      ...(since ? { since } : {}),
+    });
     if (isJson()) print({ schemaVersion: 1, conversations: summaries });
-    else if (!summaries.length) print("No conversations found.");
-    else print(summaries.map((item) => `${item.id}\t${item.updatedAt}\t${item.branches}\t${item.workspace}\t${item.title}`).join("\n"));
+    else if (!summaries.length) print("未找到任何会话记录。");
+    else print(summaries.map((item) => `${item.id}\t${item.updatedAt}\t${item.archived ? "[已归档]" : "[活跃]"}\t📁 ${item.projectName ?? "未分类"}\t${item.title}`).join("\n"));
   });
 
 program.command("show")
-  .description("Show an import preview")
-  .requiredOption("--source <source>", "codex or claude")
-  .requiredOption("--thread <id>")
-  .option("--workspace <path>")
-  .option("--include-incomplete")
+  .description("展示单个会话的导入预览与详细指标")
+  .requiredOption("--source <source>", "数据源: codex 或 claude")
+  .requiredOption("--thread <id>", "会话 ID")
+  .option("--workspace <path>", "工作区路径")
+  .option("--include-incomplete", "包含未完成的轮次")
   .action(async (options: { source: string; thread: string; workspace?: string; includeIncomplete?: boolean }) => {
     const adapter = sourceAdapter(sourceName(options.source));
     const summaries = await adapter.discover(options.workspace ? { workspace: options.workspace } : {});
@@ -123,7 +130,7 @@ program.command("show")
   });
 
 program.command("doctor")
-  .description("Check source and T3 readiness without changing anything")
+  .description("检查源数据与 T3 数据库就绪状态（只读无侵入）")
   .action(async () => {
     const paths = resolveTargetPaths(globalOverrides());
     const runtime = await inspectRuntime(paths);
@@ -143,13 +150,13 @@ program.command("doctor")
     print({ schemaVersion: 1, target: paths, runtime, database, sources, indexedDbCaches: discoverT3CacheProfiles(), stagingDirectories: staging });
   });
 
-const cacheCommand = program.command("cache").description("Inspect or reset T3's rebuildable IndexedDB cache");
+const cacheCommand = program.command("cache").description("检查或重置 T3 的可重建 IndexedDB 缓存");
 cacheCommand.command("reset")
-  .description("Back up and reset the most recently used T3 IndexedDB cache")
-  .option("--yes", "skip confirmation")
+  .description("备份并重置最近使用的 T3 IndexedDB 缓存")
+  .option("--yes", "跳过交互式确认")
   .action(async (options: { yes?: boolean }) => {
     if (!options.yes) {
-      if (!process.stdout.isTTY || isJson()) throw usageError("Non-interactive cache reset requires --yes.");
+      if (!process.stdout.isTTY || isJson()) throw usageError("非交互模式重置缓存必须指定 --yes。");
       if (!await confirmCacheReset()) return;
     }
     const result = await resetT3RebuildableCache(resolveTargetPaths(globalOverrides()));
@@ -157,19 +164,21 @@ cacheCommand.command("reset")
   });
 
 program.command("import")
-  .description("Import selected conversations")
-  .addOption(new Option("--source <source>", "codex or claude"))
-  .option("--workspace <path>")
-  .option("--thread <id>", "source conversation id (repeatable)", collect, [])
-  .option("--all", "select every matching conversation")
-  .option("--since <date>", "ISO date/time")
-  .option("--include-incomplete")
-  .option("--dry-run")
-  .option("--yes")
-  .option("--non-interactive")
-  .option("--no-resume")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
-    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
+  .description("导入选定的会话记录")
+  .addOption(new Option("--source <source>", "数据源: codex 或 claude"))
+  .option("--project <name>", "按项目/文件夹名称导入 (例如: Campus项目)")
+  .option("--workspace <path>", "工作区路径")
+  .option("--thread <id>", "会话 ID (可多次指定)", collect, [])
+  .option("--all", "选择匹配的所有会话")
+  .option("--include-archived", "包含已归档的会话")
+  .option("--since <date>", "仅导入指定 ISO 日期之后的记录")
+  .option("--include-incomplete", "包含未完成的轮次")
+  .option("--dry-run", "预演运行，不写入数据库")
+  .option("--yes", "自动确认执行")
+  .option("--non-interactive", "以非交互模式运行")
+  .option("--no-resume", "不创建续聊会话绑定")
+  .action(async (options: { source?: string; project?: string; workspace?: string; thread: string[]; all?: boolean; includeArchived?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+    if (!options.source || (!options.workspace && !options.project) || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
@@ -184,23 +193,29 @@ program.command("import")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("Non-interactive import requires --source, --workspace, and either --thread or --all.");
+      throw usageError("非交互模式导入需要指定 --source、(--project 或 --workspace) 以及 --thread 或 --all。");
     }
-    if (options.all && options.thread.length) throw usageError("--all and --thread are mutually exclusive.");
+    if (options.all && options.thread.length) throw usageError("--all 和 --thread 参数互斥。");
     if (!options.dryRun && !options.yes) {
-      if (!process.stdout.isTTY || options.nonInteractive || isJson()) throw usageError("Non-interactive imports require --yes.");
+      if (!process.stdout.isTTY || options.nonInteractive || isJson()) throw usageError("非交互模式导入需要指定 --yes。");
       if (!await confirmImport(options.all ? 1 : options.thread.length)) return;
     }
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
+    const summaries = await adapter.discover({
+      ...(options.project ? { project: options.project } : {}),
+      ...(options.workspace ? { workspace: options.workspace } : {}),
+      includeArchived: Boolean(options.includeArchived),
+      ...(since ? { since } : {}),
+      ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}),
+    });
     const selected: SourceSummary[] = options.all ? summaries : options.thread.map((id) => {
       const summary = summaries.find((item) => item.id === id);
-      if (!summary) throw usageError(`Conversation not found in workspace: ${id}`);
+      if (!summary) throw usageError(`未找到指定会话: ${id}`);
       return summary;
     });
-    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace!, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: summary.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
     const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
@@ -208,13 +223,13 @@ program.command("import")
   });
 
 program.command("replace")
-  .description("Replace canonical T3 tasks with complete provider transcripts")
-  .addOption(new Option("--source <source>", "codex or claude"))
-  .option("--workspace <path>")
-  .option("--thread <id>", "source conversation id (repeatable)", collect, [])
-  .option("--dry-run")
-  .option("--yes")
-  .option("--non-interactive")
+  .description("使用完整的 Provider 会话内容替换旧的 T3 任务")
+  .addOption(new Option("--source <source>", "数据源: codex 或 claude"))
+  .option("--workspace <path>", "工作区路径")
+  .option("--thread <id>", "会话 ID (可多次指定)", collect, [])
+  .option("--dry-run", "预演运行")
+  .option("--yes", "自动确认")
+  .option("--non-interactive", "非交互模式")
   .action(async (options: { source?: string; workspace?: string; thread: string[]; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
     if (!options.source || !options.workspace || options.thread.length === 0) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
@@ -250,14 +265,14 @@ program.command("replace")
   });
 
 program.command("sync")
-  .description("Append new completed, interrupted, or failed turns to previously imported conversations")
-  .addOption(new Option("--source <source>", "codex or claude"))
-  .option("--workspace <path>")
-  .option("--thread <id>", "source conversation id (repeatable)", collect, [])
-  .option("--all", "synchronize every previously imported matching conversation")
-  .option("--since <date>", "ISO date/time")
-  .option("--dry-run")
-  .option("--yes")
+  .description("将新完成、中断或失败的轮次追加同步到之前已导入的会话中")
+  .addOption(new Option("--source <source>", "数据源: codex 或 claude"))
+  .option("--workspace <path>", "工作区路径")
+  .option("--thread <id>", "会话 ID (可多次指定)", collect, [])
+  .option("--all", "同步之前已导入的所有匹配会话")
+  .option("--since <date>", "仅同步指定 ISO 日期之后的轮次")
+  .option("--dry-run", "预演运行")
+  .option("--yes", "自动确认")
   .option("--non-interactive")
   .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
     if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {

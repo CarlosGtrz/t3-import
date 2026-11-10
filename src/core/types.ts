@@ -14,6 +14,9 @@ export interface SourceSummary {
   status: "complete" | "incomplete";
   branches: number;
   parentId?: string;
+  projectName?: string | undefined;
+  projectId?: string | undefined;
+  archived?: boolean | undefined;
 }
 
 export interface SourceAttachment {
@@ -70,6 +73,9 @@ export interface CanonicalThread {
   currentBranch: boolean;
   title: string;
   workspace: string;
+  projectName?: string | undefined;
+  projectId?: string | undefined;
+  archived?: boolean | undefined;
   gitBranch?: string;
   model: string;
   effort?: string;
@@ -89,8 +95,10 @@ export interface CanonicalConversation {
 
 export interface DiscoveryOptions {
   workspace?: string;
+  project?: string;
   since?: Date;
   includeIncomplete?: boolean;
+  includeArchived?: boolean;
 }
 
 export interface SourceAdapter {

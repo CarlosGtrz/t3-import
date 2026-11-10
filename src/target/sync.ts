@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import type {
   CanonicalConversation,
   CanonicalThread,
   ConversationSyncPreview,
+  SourceName,
   SyncItemResult,
   SyncRunResult,
   SyncSelection,
@@ -458,6 +459,44 @@ export async function inspectConversationSync(conversation: CanonicalConversatio
       ...(result.threadId ? { threadId: result.threadId } : {}), warnings: result.warnings,
     };
   } finally { db.close(); }
+}
+
+export function fastCheckImportedSessionIds(paths: TargetPaths, source: SourceName): Set<string> {
+  const imported = new Set<string>();
+  try {
+    for (const record of listImports(targetId(paths), source)) {
+      imported.add(record.sourceSessionId);
+    }
+  } catch {}
+  if (existsSync(paths.dbPath)) {
+    try {
+      const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const tableCheck = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_session_runtime'").get();
+        if (tableCheck) {
+          const runtimeRows = db.prepare("SELECT thread_id FROM provider_session_runtime").all() as Array<{ thread_id: string }>;
+          for (const row of runtimeRows) {
+            if (row.thread_id) imported.add(row.thread_id);
+          }
+        }
+        const eventTableCheck = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orchestration_events'").get();
+        if (eventTableCheck) {
+          const eventRows = db.prepare("SELECT metadata_json FROM orchestration_events WHERE aggregate_kind = 'thread' AND event_type = 'thread.created'").all() as Array<{ metadata_json: string }>;
+          for (const row of eventRows) {
+            try {
+              const meta = JSON.parse(row.metadata_json) as unknown;
+              if (isObject(meta) && isObject(meta.t3Import) && typeof meta.t3Import.sourceSessionId === "string") {
+                imported.add(meta.t3Import.sourceSessionId);
+              }
+            } catch {}
+          }
+        }
+      } finally {
+        db.close();
+      }
+    } catch {}
+  }
+  return imported;
 }
 
 export async function syncConversations(selections: SyncSelection[], paths: TargetPaths, options: SyncOptions): Promise<SyncRunResult> {

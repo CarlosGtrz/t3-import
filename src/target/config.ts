@@ -14,7 +14,12 @@ export interface TargetOverrides {
 export function resolveTargetPaths(overrides: TargetOverrides = {}): TargetPaths {
   const explicitHome = overrides.t3Home ?? process.env.T3CODE_HOME;
   const defaultHome = explicitHome ? resolve(explicitHome) : join(homedir(), ".t3");
-  const dbPath = overrides.dbPath ? resolve(overrides.dbPath) : join(defaultHome, "userdata", "state.sqlite");
+  let defaultDb = join(defaultHome, "userdata", "statev2.sqlite");
+  if (!existsSync(defaultDb)) {
+    const legacyDb = join(defaultHome, "userdata", "state.sqlite");
+    if (existsSync(legacyDb)) defaultDb = legacyDb;
+  }
+  const dbPath = overrides.dbPath ? resolve(overrides.dbPath) : defaultDb;
   const stateDir = dirname(dbPath);
   const t3Home = overrides.dbPath && !explicitHome ? dirname(stateDir) : defaultHome;
   return {

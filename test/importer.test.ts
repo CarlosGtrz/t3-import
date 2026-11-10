@@ -76,7 +76,7 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
 
   it("fails closed on unknown migrations", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-schema-"));
-    const paths = createFixture(join(root, "t3"), Math.max(...SUPPORTED_MIGRATIONS) + 1);
+    const paths = createFixture(join(root, "t3"), 39);
     await expect(importConversations([], paths, { dryRun: true, resume: true }))
       .rejects.toMatchObject({ exitCode: 3 });
   });

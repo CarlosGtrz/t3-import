@@ -47,13 +47,13 @@ describe("interactive TUI", () => {
   });
 
   it("advertises only controls supported by each screen", () => {
-    expect(helpTextForScreen("source")).toBe("↑/↓ or j/k move  Enter choose  Esc back/quit  q quit");
-    expect(helpTextForScreen("workspace")).not.toContain("Space select");
-    expect(helpTextForScreen("provider")).not.toContain("/ search");
-    expect(helpTextForScreen("threads")).toContain("Space select  a all  / search");
-    expect(helpTextForScreen("threads", true)).toBe("Type to search  Backspace delete  Enter apply  Esc cancel");
-    expect(helpTextForScreen("review")).toBe("Enter confirm  Esc back  q quit");
-    expect(helpTextForScreen("result")).toBe("↑/↓ or j/k move  Enter confirm  q quit");
+    expect(helpTextForScreen("source")).toBe("↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出");
+    expect(helpTextForScreen("workspace")).not.toContain("空格 选择");
+    expect(helpTextForScreen("provider")).not.toContain("/ 搜索");
+    expect(helpTextForScreen("threads")).toContain("空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索");
+    expect(helpTextForScreen("threads", true)).toBe("输入关键字搜索  Backspace 删除  Enter 确认  Esc 取消");
+    expect(helpTextForScreen("review")).toBe("Enter 确认执行  Esc 返回  q 退出");
+    expect(helpTextForScreen("result")).toBe("↑/↓ 或 j/k 移动  Enter 确认  q 退出");
     expect(helpTextForScreen("running")).toBeUndefined();
   });
 
@@ -69,30 +69,30 @@ describe("interactive TUI", () => {
       sourceId: "fixture", status, newTurns, newCompletedTurns: newTurns, newInterruptedTurns: 0, newFailedTurns: 0, ignoredActiveTurns: 0, adoptedTurns: 0, titleChanged: false,
       selectable: status === "new" || status === "syncable", previouslyImported: status !== "new", warnings: [],
     });
-    expect(conversationStatusText(preview("new"), false)).toBe("new");
-    expect(conversationStatusText(preview("syncable", 3), false)).toBe("3 new turns");
-    expect(conversationStatusText(preview("up-to-date"), false)).toBe("up to date");
-    expect(conversationStatusText(preview("history-diverged"), false)).toBe("history changed");
-    expect(conversationStatusText(preview("branch-sync-unsupported"), false)).toBe("branch sync unsupported");
-    expect(conversationStatusText({ ...preview("syncable", 1), newCompletedTurns: 0, newInterruptedTurns: 1 }, false)).toBe("1 new turn · interrupted");
-    expect(conversationStatusText({ ...preview("syncable", 3), newCompletedTurns: 1, newInterruptedTurns: 1, newFailedTurns: 1 }, false)).toBe("3 new turns · 1 interrupted, 1 failed");
-    expect(conversationStatusText({ ...preview("up-to-date"), ignoredActiveTurns: 1 }, false)).toBe("up to date · 1 active turn ignored");
-    expect(conversationStatusText(preview("active-only"), false)).toBe("active turn only");
+    expect(conversationStatusText(preview("new"), false)).toBe("新会话");
+    expect(conversationStatusText(preview("syncable", 3), false)).toBe("3 个新轮次");
+    expect(conversationStatusText(preview("up-to-date"), false)).toBe("已是最新");
+    expect(conversationStatusText(preview("history-diverged"), false)).toBe("历史已变更");
+    expect(conversationStatusText(preview("branch-sync-unsupported"), false)).toBe("不支持分支同步");
+    expect(conversationStatusText({ ...preview("syncable", 1), newCompletedTurns: 0, newInterruptedTurns: 1 }, false)).toBe("1 个新轮次 · 已中断");
+    expect(conversationStatusText({ ...preview("syncable", 3), newCompletedTurns: 1, newInterruptedTurns: 1, newFailedTurns: 1 }, false)).toBe("3 个新轮次 · 1 个中断, 1 个失败");
+    expect(conversationStatusText({ ...preview("up-to-date"), ignoredActiveTurns: 1 }, false)).toBe("已是最新 · 忽略 1 个进行中轮次");
+    expect(conversationStatusText(preview("active-only"), false)).toBe("仅有进行中轮次");
     const replacement = (status: ConversationReplacePreview["status"]): ConversationReplacePreview => ({
       sourceId: "fixture", status, selectable: status === "replaceable", previouslyImported: status !== "not-imported",
       turns: 2, events: 12, attachments: 0, warnings: [],
     });
-    expect(replacementStatusText(replacement("replaceable"), false)).toBe("replace available");
-    expect(replacementStatusText(replacement("already-current"), false)).toBe("already current");
-    expect(replacementStatusText(replacement("active-source"), false)).toBe("active source");
-    expect(replacementStatusText(replacement("branch-replace-unsupported"), false)).toBe("branch replacement unsupported");
+    expect(replacementStatusText(replacement("replaceable"), false)).toBe("可替换");
+    expect(replacementStatusText(replacement("already-current"), false)).toBe("已是最新版本");
+    expect(replacementStatusText(replacement("active-source"), false)).toBe("源处于活跃中");
+    expect(replacementStatusText(replacement("branch-replace-unsupported"), false)).toBe("不支持分支替换");
   });
 
   it("selects starting T3 Code by default on the completion prompt", () => {
     const tui = render(<StartT3Prompt index={0} />);
-    expect(tui.lastFrame()).toContain("Start T3 Code now?");
-    expect(tui.lastFrame()).toContain("›  Yes");
-    expect(tui.lastFrame()).toContain("   No");
+    expect(tui.lastFrame()).toContain("现在启动 T3 Code 吗？");
+    expect(tui.lastFrame()).toContain("›  是 (Yes)");
+    expect(tui.lastFrame()).toContain("   否 (No)");
     tui.unmount();
   });
 
@@ -119,26 +119,26 @@ describe("interactive TUI", () => {
       resetCache
     />);
     const frame = tui.lastFrame()!;
-    expect(frame).toContain("Review replacement");
-    expect(frame).toContain("Old T3 task: old-thread-id");
-    expect(frame).toContain("New T3 task: new-thread-id");
-    expect(frame).toContain("4 turns · 36 events · 2 attachments");
-    expect(frame).toContain("When you confirm, t3-import will automatically:");
-    expect(frame).toContain("Create a verified backup of the T3 database");
-    expect(frame).toContain("Back up and reset T3's UI cache");
-    expect(frame).toContain("Press Enter to replace, or Escape to cancel.");
-    expect(frame).not.toContain("New tasks:");
-    expect(frame).not.toContain("synchronized tasks:");
+    expect(frame).toContain("确认会话替换");
+    expect(frame).toContain("旧 T3 任务 ID：old-thread-id");
+    expect(frame).toContain("新 T3 任务 ID：new-thread-id");
+    expect(frame).toContain("4 轮对话 · 36 个事件 · 2 个附件");
+    expect(frame).toContain("确认后，t3-import 将自动执行：");
+    expect(frame).toContain("创建已校验的 T3 数据库安全备份");
+    expect(frame).toContain("备份并重置 T3 UI 缓存");
+    expect(frame).toContain("按 Enter 确认替换，按 Esc 取消。");
+    expect(frame).not.toContain("新增任务数：");
+    expect(frame).not.toContain("同步任务数：");
     tui.unmount();
   });
 
   it("supports arrow and vim-style source navigation", async () => {
     const tui = render(<ImportTui paths={paths} />);
     const initialFrame = await waitForFrame(tui, "›  Codex");
-    expect(initialFrame).toContain("Choose a source");
-    expect(initialFrame).toContain("Enter choose");
-    expect(initialFrame).not.toContain("Space select");
-    expect(initialFrame).not.toContain("/ search");
+    expect(initialFrame).toContain("选择会话来源");
+    expect(initialFrame).toContain("Enter 选择");
+    expect(initialFrame).not.toContain("空格 选择");
+    expect(initialFrame).not.toContain("/ 搜索");
 
     tui.stdin.write("j");
     await waitForFrame(tui, "›  Claude Code");
@@ -162,9 +162,9 @@ describe("interactive TUI", () => {
     };
     writeFileSync(livePaths.runtimeStatePath, JSON.stringify({ version: 1, pid: process.pid, origin: "http://127.0.0.1:1" }));
     const tui = render(<ImportTui paths={livePaths} />);
-    const frame = await waitForFrame(tui, `detected PID ${process.pid}`);
-    expect(frame).toContain("T3 is running");
-    expect(frame).not.toContain("Choose a source");
+    const frame = await waitForFrame(tui, `PID ${process.pid}`);
+    expect(frame).toContain("检测到 T3 Code 正在运行");
+    expect(frame).not.toContain("选择会话来源");
     tui.unmount();
   });
 });
