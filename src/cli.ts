@@ -12,7 +12,7 @@ import { ImporterError, usageError } from "./core/errors.js";
 import type { ImportRunResult, ReplaceRunResult, SourceName, SourceSummary, SyncRunResult } from "./core/types.js";
 import { disposeSourceAdapters, sourceAdapter } from "./sources/index.js";
 import { resolveTargetPaths, type TargetOverrides } from "./target/config.js";
-import { IMPORTER_VERSION, importConversations } from "./target/importer.js";
+import { IMPORTER_VERSION, importConversations, listActiveT3Projects } from "./target/importer.js";
 import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
 import { replaceConversations } from "./target/replace.js";
@@ -177,7 +177,24 @@ program.command("import")
   .option("--yes", "自动确认执行")
   .option("--non-interactive", "以非交互模式运行")
   .option("--no-resume", "不创建续聊会话绑定")
-  .action(async (options: { source?: string; project?: string; workspace?: string; thread: string[]; all?: boolean; includeArchived?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+  .option("--no-project", "作为独立对话导入 (无项目 / No project)")
+  .option("--target-project <nameOrId>", "导入到指定的已存在 T3 项目 (名称或 ID)")
+  .action(async (options: {
+    source?: string;
+    project?: string;
+    workspace?: string;
+    thread: string[];
+    all?: boolean;
+    includeArchived?: boolean;
+    since?: string;
+    includeIncomplete?: boolean;
+    dryRun?: boolean;
+    yes?: boolean;
+    nonInteractive?: boolean;
+    resume: boolean;
+    noProject?: boolean;
+    targetProject?: string;
+  }) => {
     if (!options.source || (!options.workspace && !options.project) || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
@@ -217,7 +234,25 @@ program.command("import")
     });
     const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: summary.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
-    const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
+    let targetProjectId: string | undefined;
+    if (options.targetProject) {
+      const activeProjects = listActiveT3Projects(paths);
+      const match = activeProjects.find((p) => p.id === options.targetProject || p.title.toLowerCase() === options.targetProject!.toLowerCase());
+      if (match) {
+        targetProjectId = match.id;
+      } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.targetProject)) {
+        targetProjectId = options.targetProject;
+      } else {
+        throw usageError(`未找到指定的 T3 目标项目: ${options.targetProject}。当前可用项目: ${activeProjects.map((p) => p.title).join(", ") || "无"}`);
+      }
+    }
+    const result: ImportRunResult = await importConversations(loaded, paths, {
+      ...globalOverrides(),
+      dryRun: Boolean(options.dryRun),
+      resume: options.resume,
+      noProject: Boolean(options.noProject),
+      targetProjectId,
+    });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));
     print(result);
   });

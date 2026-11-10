@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { basename } from "node:path";
 import type {
   CanonicalConversation,
   ConversationReplacePreview,
@@ -16,7 +17,7 @@ import type {
 } from "./core/types.js";
 import { sourceAdapter } from "./sources/index.js";
 import { inferCurrentWorkspace } from "./sources/codex.js";
-import { compactThreadForImport, importConversations } from "./target/importer.js";
+import { compactThreadForImport, importConversations, listActiveT3Projects, type T3ProjectInfo } from "./target/importer.js";
 import { fastCheckImportedSessionIds, inspectConversationSync, syncConversations } from "./target/sync.js";
 import { listProviderInstances } from "./target/config.js";
 import { inspectRuntime, type RuntimeState } from "./target/schema.js";
@@ -24,7 +25,7 @@ import { launchT3Code } from "./target/launch.js";
 import { resetT3RebuildableCache } from "./target/cache.js";
 import { inspectConversationReplacement, replaceConversations } from "./target/replace.js";
 
-export type Screen = "preflight" | "blocked" | "source" | "workspace" | "provider" | "threads" | "review" | "running" | "result" | "launching" | "launch-error" | "error";
+export type Screen = "preflight" | "blocked" | "source" | "workspace" | "target-project" | "provider" | "threads" | "review" | "running" | "result" | "launching" | "launch-error" | "error";
 
 export function escapeDestination(screen: Screen, history: Screen[]): Screen | undefined {
   if (["source", "blocked", "result", "launch-error", "error"].includes(screen)) return undefined;
@@ -44,7 +45,7 @@ export function helpTextForScreen(screen: Screen, searching = false): string | u
   if (searching) return "输入关键字搜索  Backspace 删除  Enter 确认  Esc 取消";
   if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索  v 切换显示模式  Enter 继续  Esc 返回  q 退出";
   if (screen === "workspace") return "↑/↓ 或 j/k 移动  Enter 选择  Tab 切换分组模式  Esc 返回/退出  q 退出";
-  if (screen === "source" || screen === "provider") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
+  if (screen === "source" || screen === "provider" || screen === "target-project") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
   if (screen === "review") return "Enter 确认执行  Esc 返回  q 退出";
   if (screen === "result") return "↑/↓ 或 j/k 移动  Enter 确认  q 退出";
   return undefined;
@@ -172,6 +173,8 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   const [preparedImports, setPreparedImports] = useState<ImportSelection[]>([]);
   const [preparedSync, setPreparedSync] = useState<SyncSelection[]>([]);
   const [preparedReplacements, setPreparedReplacements] = useState<ReplaceSelection[]>([]);
+  const [t3Projects, setT3Projects] = useState<T3ProjectInfo[]>([]);
+  const [targetProjectChoice, setTargetProjectChoice] = useState<{ mode: "auto" | "no-project" | "existing"; projectId?: string; projectTitle?: string }>({ mode: "auto" });
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<ImportRunResult>();
@@ -428,18 +431,27 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     }
     if (input === "q") { app.exit(); return; }
     if (screen === "blocked" && (input === "r" || key.return)) { checkRuntime(); return; }
+    const listLength = screen === "source" || screen === "result"
+      ? 2
+      : screen === "workspace"
+      ? groups.length
+      : screen === "provider"
+      ? providers.length
+      : screen === "target-project"
+      ? 2 + t3Projects.length
+      : visibleThreads.length;
     if (key.upArrow || input === "k") {
-      move(-1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? groups.length : screen === "provider" ? providers.length : visibleThreads.length);
+      move(-1, listLength);
       return;
     }
     if (key.downArrow || input === "j") {
-      move(1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? groups.length : screen === "provider" ? providers.length : visibleThreads.length);
+      move(1, listLength);
       return;
     }
     if (key.escape) {
       const previous = escapeDestination(screen, screenHistory);
       if (!previous) { app.exit(); return; }
-      if (screen === "provider" && previous === "threads") { setPreparedImports([]); setPreparedSync([]); setPreparedReplacements([]); }
+      if ((screen === "provider" || screen === "target-project") && previous === "threads") { setPreparedImports([]); setPreparedSync([]); setPreparedReplacements([]); }
       setScreenHistory((history) => history.slice(0, -1));
       setScreen(previous);
       setIndex(0);
@@ -469,8 +481,22 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         return;
       }
     }
+    if (screen === "target-project" && key.return) {
+      if (index === 0) {
+        setTargetProjectChoice({ mode: "auto" });
+      } else if (index === 1) {
+        setTargetProjectChoice({ mode: "no-project" });
+      } else {
+        const proj = t3Projects[index - 2];
+        if (proj) {
+          setTargetProjectChoice({ mode: "existing", projectId: proj.id, projectTitle: proj.title });
+        }
+      }
+      navigate(!initialProvider && providers.length > 1 ? "provider" : "review");
+      return;
+    }
     if (screen === "provider" && key.return && providers[index]) {
-      setProvider(providers[index]); navigate(preparedImports.length ? "review" : "threads"); return;
+      setProvider(providers[index]); navigate("review"); return;
     }
     if (screen === "threads") {
       if (input === "v") {
@@ -518,7 +544,19 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
             else imports.push({ conversation, resume: true });
           }
           setPreparedImports(imports); setPreparedSync(syncs); setPreparedReplacements(replacements);
-          navigate(imports.length > 0 && !initialProvider && providers.length > 1 ? "provider" : "review");
+          if (imports.length > 0) {
+            try {
+              const activeProjects = listActiveT3Projects(paths).filter(
+                (p) => p.title !== "No project" && p.title !== "无项目"
+              );
+              setT3Projects(activeProjects);
+            } catch {
+              setT3Projects([]);
+            }
+            navigate("target-project");
+          } else {
+            navigate("review");
+          }
         };
         prepareAndProceed().catch((cause) => {
           setError(cause instanceof Error ? cause.message : String(cause));
@@ -531,7 +569,13 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       setScreen("running");
       const run = async () => {
         const imported = preparedImports.length
-          ? await importConversations(preparedImports, paths, { dryRun: false, resume: true, ...(provider ? { providerInstance: provider } : {}) })
+          ? await importConversations(preparedImports, paths, {
+              dryRun: false,
+              resume: true,
+              ...(provider ? { providerInstance: provider } : {}),
+              noProject: targetProjectChoice.mode === "no-project",
+              targetProjectId: targetProjectChoice.mode === "existing" ? targetProjectChoice.projectId : undefined,
+            })
           : undefined;
         const synced = preparedSync.length
           ? await syncConversations(preparedSync, paths, { dryRun: false, allowProjectionBacklog: Boolean(imported?.results.some((item) => item.status === "imported")) })
@@ -579,6 +623,20 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         {summaries.length === 0 ? <Text>正在扫描 {source} 历史会话…</Text> : <Menu items={workspaces} index={index} />}
       </>}
       {screen === "provider" && <><Text bold>选择目标 T3 Provider 实例</Text><Menu items={providers} index={index} /></>}
+      {screen === "target-project" && <>
+        <Text bold>选择导入目标（T3 Code 项目归属）</Text>
+        <Text dimColor>请选择将选中的 {preparedImports.length} 个对话导入到哪个 T3 项目：</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Menu
+            items={[
+              `📁 自动创建/归入同名项目：${selectedProject ?? (workspace ? basename(workspace) : "自动识别")}（默认）`,
+              `📄 作为独立对话导入（无项目 / No project）`,
+              ...t3Projects.map((p) => `🔗 放入已有项目：${p.title}`),
+            ]}
+            index={index}
+          />
+        </Box>
+      </>}
       {screen === "threads" && <>
         <Text bold>{mode === "sync" ? "选择要同步的会话" : mode === "replace" ? "选择要替换的会话" : "选择要导入的会话"} — 📁 {selectedProject ?? workspace}</Text>
         <Box flexDirection="row">
@@ -621,6 +679,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         </> : <>
           <Text bold>确认导入变更</Text>
           <Text>来源：{source} · 分组/项目：{selectedProject ?? workspace}</Text>
+          {preparedImports.length ? <Text>目标项目：{targetProjectChoice.mode === "no-project" ? "独立对话（无项目 / No project）" : targetProjectChoice.mode === "existing" ? `已有项目：${targetProjectChoice.projectTitle}` : `自动同名项目：${selectedProject ?? (workspace ? basename(workspace) : "自动识别")}`}</Text> : null}
           <Text>新增任务数：{importPreview.tasks} · 同步任务数：{syncPreview.tasks}</Text>
           <Text>导入轮次：{importPreview.turns} · 新增轮次：{syncPreview.turns} · 采纳轮次：{syncPreview.adopted}</Text>
           <Text>消息总数：{importPreview.messages} · 工具行为：{importPreview.activities} · 附件图片：{importPreview.attachments}</Text>

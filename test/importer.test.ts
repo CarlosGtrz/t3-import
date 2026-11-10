@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { importConversations } from "../src/target/importer.js";
+import { importConversations, listActiveT3Projects } from "../src/target/importer.js";
 import { canonicalConversation, canonicalThread, createTarget, eventCount } from "./helpers.js";
 
 import { SUPPORTED_MIGRATIONS } from "../src/target/schema.js";
@@ -159,5 +159,68 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
       paths,
       { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("unprojected event") });
+  });
+
+  it("imports threads into No project when noProject option is set", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-no-project-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createFixture(join(root, "t3"));
+    const thread = canonicalThread(workspace);
+    const result = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: false }],
+      paths,
+      { dryRun: false, resume: false, noProject: true },
+    );
+    expect(result.results[0]!.status).toBe("imported");
+    const db = new Database(paths.dbPath, { readonly: true });
+    const threadEvent = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.created'").get() as { payload: string };
+    const payload = JSON.parse(threadEvent.payload);
+    expect(payload.projectId).toBe("038044f3-eb38-49e9-a28e-5668f1420b6b");
+    const projectEvents = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE event_type='project.created'").get() as { count: number };
+    expect(projectEvents.count).toBe(0);
+    db.close();
+  });
+
+  it("imports threads into specified targetProjectId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-target-project-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createFixture(join(root, "t3"));
+    const customProjectId = "99999999-9999-4999-8999-999999999999";
+    const thread = canonicalThread(workspace);
+    const result = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: false }],
+      paths,
+      { dryRun: false, resume: false, targetProjectId: customProjectId },
+    );
+    expect(result.results[0]!.status).toBe("imported");
+    const db = new Database(paths.dbPath, { readonly: true });
+    const threadEvent = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.created'").get() as { payload: string };
+    const payload = JSON.parse(threadEvent.payload);
+    expect(payload.projectId).toBe(customProjectId);
+    const projectEvents = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE event_type='project.created'").get() as { count: number };
+    expect(projectEvents.count).toBe(0);
+    db.close();
+  });
+
+  it("lists active T3 projects from projection_projects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-list-projects-"));
+    const paths = createFixture(join(root, "t3"));
+    const db = new Database(paths.dbPath);
+    db.prepare("INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+      "test-proj-id-1", "测试项目1", "/tmp/ws1", "[]", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"
+    );
+    db.prepare("INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      "test-proj-id-del", "已删除项目", "/tmp/wsdel", "[]", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"
+    );
+    db.close();
+    const projects = listActiveT3Projects(paths);
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toEqual({
+      id: "test-proj-id-1",
+      title: "测试项目1",
+      workspaceRoot: "/tmp/ws1",
+    });
   });
 });

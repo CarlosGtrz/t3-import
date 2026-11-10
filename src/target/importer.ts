@@ -164,6 +164,8 @@ export function compactThreadForImport(thread: CanonicalThread): CanonicalThread
 export interface ImportOptions extends TargetOverrides {
   dryRun: boolean;
   resume: boolean;
+  targetProjectId?: string | undefined;
+  noProject?: boolean | undefined;
 }
 
 export function projectionBacklog(db: Database.Database): { latestSequence: number; projectedSequence: number; backlog: number } {
@@ -347,6 +349,27 @@ function existingProjectId(db: Database.Database, workspace: string): string | u
   })?.streamId;
 }
 
+export interface T3ProjectInfo {
+  id: string;
+  title: string;
+  workspaceRoot: string;
+}
+
+export function listActiveT3Projects(paths: TargetPaths): T3ProjectInfo[] {
+  if (!existsSync(paths.dbPath)) return [];
+  const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const hasTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projection_projects'").get());
+    if (!hasTable) return [];
+    const rows = db.prepare("SELECT project_id id, title, workspace_root workspaceRoot FROM projection_projects WHERE deleted_at IS NULL ORDER BY updated_at DESC").all() as T3ProjectInfo[];
+    return rows;
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
 function existingProjectByName(db: Database.Database, projectName: string): string | undefined {
   const row = db.prepare("SELECT project_id projectId FROM projection_projects WHERE title = ? AND deleted_at IS NULL").get(projectName) as { projectId: string } | undefined;
   if (row) return row.projectId;
@@ -459,24 +482,35 @@ export async function importConversations(
           ? thread.sourceSessionId
           : deterministicUuid(`t3-import:thread:${thread.sourceKey}`);
         const imported = isImported(db, thread.sourceKey, thread, threadId);
-        const workspaceKey = canonicalPath(thread.workspace);
-        const isNamedProject = Boolean(thread.projectName && thread.projectName !== "未分类会话");
-        const projectKey = isNamedProject ? `named:${thread.projectName}` : workspaceKey;
-        let projectId = projectIds.get(projectKey) ?? (isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace));
-        if (!projectId) projectId = deterministicUuid(`t3-import:project:${projectKey}`);
-        projectIds.set(projectKey, projectId);
         const provider = resolveProviderSelection(paths, thread.source, thread.model, thread.effort, options.providerInstance);
         const seed = thread.sourceKey;
-        const projectTitle = isNamedProject ? thread.projectName! : basename(thread.workspace);
-        const alreadyHasProject = Boolean(
-          isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace)
-        );
-        const projectEvent = !imported && !alreadyHasProject && !plannedProjectEvents.has(projectId)
-          ? event(`project:${projectKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
+        let projectId: string;
+        let projectEvent: PlannedEvent | undefined;
+
+        if (options.noProject) {
+          const noProjectRow = db.prepare("SELECT project_id projectId FROM projection_projects WHERE (title = 'No project' OR title = '无项目') AND deleted_at IS NULL").get() as { projectId: string } | undefined;
+          projectId = noProjectRow?.projectId ?? "038044f3-eb38-49e9-a28e-5668f1420b6b";
+        } else if (options.targetProjectId) {
+          projectId = options.targetProjectId;
+        } else {
+          const workspaceKey = canonicalPath(thread.workspace);
+          const isNamedProject = Boolean(thread.projectName && thread.projectName !== "未分类会话");
+          const projectKey = isNamedProject ? `named:${thread.projectName}` : workspaceKey;
+          let id = projectIds.get(projectKey) ?? (isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace));
+          if (!id) id = deterministicUuid(`t3-import:project:${projectKey}`);
+          projectIds.set(projectKey, id);
+          projectId = id;
+          const projectTitle = isNamedProject ? thread.projectName! : basename(thread.workspace);
+          const alreadyHasProject = Boolean(
+            isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace)
+          );
+          if (!imported && !alreadyHasProject && !plannedProjectEvents.has(projectId)) {
+            projectEvent = event(`project:${projectKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
               projectId, title: projectTitle, workspaceRoot: thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
-            })
-          : undefined;
-        if (projectEvent) plannedProjectEvents.add(projectId);
+            });
+            plannedProjectEvents.add(projectId);
+          }
+        }
         const resumable = options.resume && selection.resume && thread.currentBranch && Boolean(thread.resumeCursor);
         const plan = planThread(thread, threadId, projectId, paths, provider, seed, projectEvent, resumable, selection.conversation.fingerprint);
         plan.alreadyImported = imported;

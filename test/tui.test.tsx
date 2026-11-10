@@ -48,6 +48,7 @@ describe("interactive TUI", () => {
 
   it("advertises only controls supported by each screen", () => {
     expect(helpTextForScreen("source")).toBe("↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出");
+    expect(helpTextForScreen("target-project")).toBe("↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出");
     expect(helpTextForScreen("workspace")).not.toContain("空格 选择");
     expect(helpTextForScreen("provider")).not.toContain("/ 搜索");
     expect(helpTextForScreen("threads")).toContain("空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索");
@@ -61,7 +62,9 @@ describe("interactive TUI", () => {
     expect(escapeDestination("threads", ["source"])).toBe("source");
     expect(escapeDestination("threads", ["source", "workspace"])).toBe("workspace");
     expect(escapeDestination("threads", [])).toBeUndefined();
+    expect(escapeDestination("target-project", ["source", "workspace", "threads"])).toBe("threads");
     expect(escapeDestination("review", ["source", "threads", "provider"])).toBe("provider");
+    expect(escapeDestination("review", ["source", "threads", "target-project"])).toBe("target-project");
   });
 
   it("uses the documented reconciliation status labels", () => {
