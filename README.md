@@ -96,7 +96,10 @@ t3-import replace --source codex --workspace /path/to/project --thread <thread-i
 # 运行只读环境诊断
 t3-import doctor
 
-# 独立备份并重置 T3 UI 缓存
+# 修复旧版导入的会话（侧边栏消失 / 正文为空）
+t3-import repair --yes
+
+# 独立备份并重置 T3 UI 缓存（仅界面状态，不涉及聊天记录）
 t3-import cache reset --yes
 ```
 
@@ -193,7 +196,10 @@ t3-import replace --source codex --workspace /path/to/project --thread <thread-i
 # Non-destructive diagnostics
 t3-import doctor
 
-# Reset IndexedDB cache safely
+# Repair conversations imported by older versions
+t3-import repair --yes
+
+# Reset IndexedDB cache safely (UI state only, never chat history)
 t3-import cache reset --yes
 ```
 

@@ -78,7 +78,7 @@ export interface PlannedThread {
 }
 
 export const MAX_SAFE_IMPORT_EVENTS = 900;
-export const IMPORTER_VERSION = "0.4.1";
+export const IMPORTER_VERSION = "0.5.3";
 const MAX_LAST_ERROR_LENGTH = 500;
 
 function settledSession(turn: CanonicalThread["turns"][number]): { status: "ready" | "interrupted" | "error"; lastError: string | null } {
@@ -598,6 +598,31 @@ export async function importConversations(
           runtime_payload_json=excluded.runtime_payload_json
       `);
       const hasV2Projection = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orchestration_v2_projection_threads'").get());
+      const hasTable = (name: string): boolean => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+      const hasLegacyBridge = hasTable("projection_threads") && hasTable("projection_thread_messages") && hasTable("orchestration_v2_legacy_imports");
+      const upsertLegacyThread = hasLegacyBridge ? db.prepare(`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, worktree_path, created_at, updated_at,
+          runtime_mode, interaction_mode, model_selection_json,
+          latest_user_message_at, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'full-access', 'default', ?, ?, NULL)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          project_id = excluded.project_id,
+          title = excluded.title,
+          worktree_path = excluded.worktree_path,
+          updated_at = excluded.updated_at,
+          runtime_mode = excluded.runtime_mode,
+          interaction_mode = excluded.interaction_mode,
+          model_selection_json = excluded.model_selection_json,
+          latest_user_message_at = excluded.latest_user_message_at,
+          deleted_at = NULL
+      `) : null;
+      const upsertLegacyMessage = hasLegacyBridge ? db.prepare(`
+        INSERT OR REPLACE INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming,
+          created_at, updated_at, attachments_json, context_json
+        ) VALUES (?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL)
+      `) : null;
       const upsertV2Thread = hasV2Projection ? db.prepare(`
         INSERT INTO orchestration_v2_projection_threads (
           thread_id, project_id, title, default_provider, runtime_mode,
@@ -642,12 +667,14 @@ export async function importConversations(
             const cursor = plan.thread.source === "claude" ? { threadId: plan.threadId, ...plan.thread.resumeCursor } : plan.thread.resumeCursor;
             upsertRuntime.run(plan.threadId, plan.provider.providerName, plan.provider.instanceId, plan.provider.adapterKey, plan.thread.updatedAt, JSON.stringify(cursor), JSON.stringify({ cwd: plan.thread.workspace, model: plan.provider.model, activeTurnId: null, lastError: null, modelSelection: modelSelection(plan.provider), lastRuntimeEvent: `t3-import.${plan.thread.source}`, lastRuntimeEventAt: plan.thread.updatedAt }));
           }
-          if (hasV2Projection && upsertV2Thread && upsertV2Message && upsertV2Project) {
+          if (hasV2Projection && upsertV2Project) {
             upsertV2Project.run(plan.projectId, basename(plan.thread.workspace), plan.thread.workspace, plan.thread.createdAt, plan.thread.updatedAt);
             const activeProviderThreadId = plan.resumable && plan.thread.source === "codex" ? plan.thread.sourceSessionId : null;
+            // "import" is not a valid T3 creationSource; T3 validates this enum and a single
+            // bad value breaks the whole shell projection (empty sidebar).
             const threadPayload = {
               createdBy: "user",
-              creationSource: "import",
+              creationSource: "server",
               id: plan.threadId,
               projectId: plan.projectId,
               title: plan.thread.title,
@@ -681,76 +708,99 @@ export async function importConversations(
               titleRegeneration: null,
               deletedAt: null,
             };
-            upsertV2Thread.run(
-              plan.threadId,
-              plan.projectId,
-              plan.thread.title,
-              plan.provider.providerName,
-              activeProviderThreadId,
-              plan.thread.createdAt,
-              plan.thread.updatedAt,
-              JSON.stringify(threadPayload),
-              plan.provider.instanceId,
-            );
-            plan.thread.turns.forEach((turn, turnIndex) => {
-              const runId = `run:thread:${plan.threadId}:ordinal:${turnIndex + 1}`;
-              const userMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:user`);
-              const userNodeId = `node:run:${runId}:root`;
-              const userPayload = {
-                createdBy: "user",
-                creationSource: "user",
-                id: userMsgId,
-                threadId: plan.threadId,
-                runId,
-                nodeId: userNodeId,
-                role: "user",
-                text: turn.user.text,
-                context: { version: 1, records: [] },
-                attachments: turn.user.attachments || [],
-                streaming: false,
-                createdAt: turn.user.timestamp,
-                updatedAt: turn.user.timestamp,
-              };
-              upsertV2Message.run(
-                userMsgId,
+
+            if (hasLegacyBridge && upsertLegacyThread && upsertLegacyMessage) {
+              // T3 0.1.6 rebuilds its orchestration-v2 timeline from these legacy v1 tables
+              // on startup (reconcileShells -> ensureTranscript). Writing only the v2
+              // projection leaves threads with an empty transcript.
+              upsertLegacyThread.run(
                 plan.threadId,
-                runId,
-                userNodeId,
-                "user",
-                turn.user.timestamp,
-                turn.user.timestamp,
-                JSON.stringify(userPayload),
+                plan.projectId,
+                plan.thread.title,
+                plan.thread.workspace,
+                plan.thread.createdAt,
+                plan.thread.updatedAt,
+                JSON.stringify(modelSelection(plan.provider)),
+                plan.thread.updatedAt,
               );
-              turn.assistant.forEach((assistantMsg, msgIndex) => {
-                const assistantMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:assistant:${assistantMsg.sourceId || msgIndex}`);
-                const assistantNodeId = `node:provider:${plan.provider.providerName}:item:${assistantMsgId}`;
-                const assistantPayload = {
-                  createdBy: "agent",
-                  creationSource: "provider",
-                  id: assistantMsgId,
+              for (const turn of plan.thread.turns) {
+                const userMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:user`);
+                upsertLegacyMessage.run(
+                  userMsgId,
+                  plan.threadId,
+                  "user",
+                  turn.user.text,
+                  turn.user.timestamp,
+                  turn.user.timestamp,
+                  JSON.stringify(turn.user.attachments ?? []),
+                );
+                turn.assistant.forEach((assistantMsg, msgIndex) => {
+                  const assistantMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:assistant:${assistantMsg.sourceId || msgIndex}`);
+                  upsertLegacyMessage.run(
+                    assistantMsgId,
+                    plan.threadId,
+                    "assistant",
+                    assistantMsg.text,
+                    assistantMsg.timestamp,
+                    assistantMsg.timestamp,
+                    JSON.stringify(assistantMsg.attachments ?? []),
+                  );
+                });
+              }
+            } else if (upsertV2Thread && upsertV2Message) {
+              upsertV2Thread.run(
+                plan.threadId,
+                plan.projectId,
+                plan.thread.title,
+                plan.provider.providerName,
+                activeProviderThreadId,
+                plan.thread.createdAt,
+                plan.thread.updatedAt,
+                JSON.stringify(threadPayload),
+                plan.provider.instanceId,
+              );
+              plan.thread.turns.forEach((turn, turnIndex) => {
+                const runId = `run:thread:${plan.threadId}:ordinal:${turnIndex + 1}`;
+                const userMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:user`);
+                const userNodeId = `node:run:${runId}:root`;
+                const userPayload = {
+                  createdBy: "user",
+                  creationSource: "user",
+                  id: userMsgId,
                   threadId: plan.threadId,
                   runId,
-                  nodeId: assistantNodeId,
-                  role: "assistant",
-                  text: assistantMsg.text,
+                  nodeId: userNodeId,
+                  role: "user",
+                  text: turn.user.text,
                   context: { version: 1, records: [] },
-                  attachments: assistantMsg.attachments || [],
+                  attachments: turn.user.attachments || [],
                   streaming: false,
-                  createdAt: assistantMsg.timestamp,
-                  updatedAt: assistantMsg.timestamp,
+                  createdAt: turn.user.timestamp,
+                  updatedAt: turn.user.timestamp,
                 };
-                upsertV2Message.run(
-                  assistantMsgId,
-                  plan.threadId,
-                  runId,
-                  assistantNodeId,
-                  "assistant",
-                  assistantMsg.timestamp,
-                  assistantMsg.timestamp,
-                  JSON.stringify(assistantPayload),
-                );
+                upsertV2Message.run(userMsgId, plan.threadId, runId, userNodeId, "user", turn.user.timestamp, turn.user.timestamp, JSON.stringify(userPayload));
+                turn.assistant.forEach((assistantMsg, msgIndex) => {
+                  const assistantMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:assistant:${assistantMsg.sourceId || msgIndex}`);
+                  const assistantNodeId = `node:provider:${plan.provider.providerName}:item:${assistantMsgId}`;
+                  const assistantPayload = {
+                    createdBy: "agent",
+                    creationSource: "provider",
+                    id: assistantMsgId,
+                    threadId: plan.threadId,
+                    runId,
+                    nodeId: assistantNodeId,
+                    role: "assistant",
+                    text: assistantMsg.text,
+                    context: { version: 1, records: [] },
+                    attachments: assistantMsg.attachments || [],
+                    streaming: false,
+                    createdAt: assistantMsg.timestamp,
+                    updatedAt: assistantMsg.timestamp,
+                  };
+                  upsertV2Message.run(assistantMsgId, plan.threadId, runId, assistantNodeId, "assistant", assistantMsg.timestamp, assistantMsg.timestamp, JSON.stringify(assistantPayload));
+                });
               });
-            });
+            }
           }
           const result = results.find((entry) => entry.threadId === plan.threadId)!;
           result.sequence = { first: firstSequence, last: lastSequence };

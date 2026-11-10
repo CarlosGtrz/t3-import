@@ -32,15 +32,19 @@ export interface T3CacheProfile {
 
 export function formatCacheResetResult(result: CacheResetResult): string {
   if (result.status === "not-found") {
-    return "No T3 IndexedDB cache was found. Nothing was changed.";
+    return "没有找到 T3 的 IndexedDB 界面缓存，未做任何修改。";
   }
   return [
-    "T3 IndexedDB cache reset successfully.",
-    `Profile: ${result.profile}`,
-    `Backup: ${result.backup}`,
-    `Entries removed: ${result.entries.length}`,
+    "T3 界面缓存（IndexedDB）已重置。",
+    `配置目录：${result.profile}`,
+    `备份：${result.backup}`,
+    `清除条目：${result.entries.length}`,
     ...result.entries.map((entry) => `  - ${entry}`),
-    ...result.warnings.map((warning) => `Warning: ${warning}`),
+    ...result.warnings.map((warning) => `警告：${warning}`),
+    "",
+    "说明：这里只清本地界面缓存（标签页、草稿、连接快照）。",
+    "聊天记录保存在 statev2.sqlite，不在这个目录；重置缓存既不会删除也不会恢复消息。",
+    "如果聊天记录缺失或导入后正文为空，请运行 `t3-import repair`。",
   ].join("\n");
 }
 

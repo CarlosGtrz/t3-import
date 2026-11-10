@@ -17,6 +17,7 @@ import { inspectRuntime, validateTargetDatabase } from "./target/schema.js";
 import { inspectConversationSync, syncConversations } from "./target/sync.js";
 import { replaceConversations } from "./target/replace.js";
 import { discoverT3CacheProfiles, formatCacheResetResult, resetT3RebuildableCache } from "./target/cache.js";
+import { repairImportedThreads } from "./target/repair.js";
 
 const sourceSchema = z.enum(["codex", "claude"]);
 const program = new Command();
@@ -57,7 +58,7 @@ async function confirmReplace(count: number): Promise<boolean> {
 
 async function confirmCacheReset(): Promise<boolean> {
   const prompt = createInterface({ input, output });
-  try { return /^(y|yes)$/iu.test((await prompt.question("确认重置 T3 的 IndexedDB 缓存吗？操作前会自动创建经过验证的备份。[y/N] ")).trim()); }
+  try { return /^(y|yes)$/iu.test((await prompt.question("确认重置 T3 的界面缓存（IndexedDB）吗？只会丢失标签页/草稿等界面状态，不会动 statev2.sqlite 里的聊天记录；操作前会自动备份。[y/N] ")).trim()); }
   finally { prompt.close(); }
 }
 
@@ -159,6 +160,38 @@ program.command("doctor")
       catch (error) { sources[name] = { available: false, error: error instanceof Error ? error.message : String(error) }; }
     }
     print({ schemaVersion: 1, target: paths, runtime, database, sources, indexedDbCaches: discoverT3CacheProfiles(), stagingDirectories: staging });
+  });
+
+program.command("repair")
+  .description("修复旧版导入的会话（正文为空 / 侧边栏消失 / creationSource 非法）")
+  .option("--dry-run", "只检查，不写入数据库")
+  .option("--yes", "跳过交互式确认")
+  .action(async (options: { dryRun?: boolean; yes?: boolean }) => {
+    if (!options.dryRun && !options.yes) {
+      if (!process.stdout.isTTY || isJson()) throw usageError("非交互模式修复需要指定 --yes。");
+      const prompt = createInterface({ input, output });
+      let confirmed = false;
+      try { confirmed = /^(y|yes)$/iu.test((await prompt.question("确认修复旧版导入的会话吗？会先备份数据库，并重建 T3 的 v1\u2192v2 迁移数据。[y/N] ")).trim()); }
+      finally { prompt.close(); }
+      if (!confirmed) return;
+    }
+    const result = await repairImportedThreads(resolveTargetPaths(globalOverrides()), { dryRun: Boolean(options.dryRun) });
+    if (isJson()) { print(result); return; }
+    if (result.status === "noop") { print("未发现需要修复的导入会话。"); return; }
+    const lines = [
+      result.status === "dry-run" ? "检查完成（未写入）" : "修复完成",
+      `目标数据库：${result.target}`,
+      result.backup ? `数据库备份：${result.backup}` : "",
+      `涉及会话：${result.threads}`,
+      `补齐 v1 旧表：${result.legacyThreads} 个会话 / ${result.legacyMessages} 条消息`,
+      `修正非法 creationSource：${result.fixedSources}`,
+      `清理无效 v2 投影行：${result.droppedProjectionRows}`,
+      "",
+      ...result.details.map((item) => `✓ ${item.title} — ${item.actions.join("；")}`),
+      "",
+      result.status === "dry-run" ? "去掉 --dry-run 即可写入。" : "现在退出并重新启动 T3 Code，启动时会自动生成时间线。",
+    ];
+    print(lines.filter((line, index) => line !== "" || index === lines.length - 2).join("\n"));
   });
 
 const cacheCommand = program.command("cache").description("检查或重置 T3 的可重建 IndexedDB 缓存");

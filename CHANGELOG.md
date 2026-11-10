@@ -4,6 +4,19 @@
 
 ---
 
+## [0.5.3] - 2026-11-10
+
+### 🩹 关键修复 (Bug Fixes)
+- **修复导入后侧边栏全空**：不再写入 T3 不接受的 `creationSource: "import"`（合法值：`web` / `mobile` / `mcp` / `provider` / `server`）。该非法枚举会让 T3 的 shell snapshot 解码失败，一条脏数据足以让整个会话列表消失。
+- **修复导入会话正文为空**：T3 0.1.6 的时间线由 v1 迁移桥（`projection_threads` / `projection_thread_messages` → 启动时迁移）生成。写入逻辑改为补齐 v1 旧表，不再只写 v2 投影，避免"列表有、正文空"。
+- **新增 `t3-import repair`**：扫描旧版导入（非法 `creationSource`、有 messages 无 turn_items、无 `thread.created` 事件），自动备份后补齐 v1 旧表、清理无效 v2 投影行，T3 下次启动即重建时间线。支持 `--dry-run`。
+- **cache reset 语义纠正与护栏**：明确输出"只清 IndexedDB 界面缓存（标签页/草稿/连接快照），聊天记录在 statev2.sqlite"，并在 `PROFILE_NAMES` 补上 `t3code-v2`，避免找错/找漏配置目录。
+
+### 🧪 测试
+- 新增 v2 迁移桥夹具与 `repair` 测试；全套 550 项测试通过。
+
+---
+
 ## [0.5.2] - 2026-11-10
 
 ### 🚀 新增特性与核心适配 (Features & Enhancements)

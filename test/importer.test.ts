@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { importConversations, listActiveT3Projects } from "../src/target/importer.js";
 import { canonicalConversation, canonicalThread, createTarget, eventCount } from "./helpers.js";
+import { upgradeFixtureToV2 } from "./support/v2-fixture.js";
 
 import { SUPPORTED_MIGRATIONS } from "../src/target/schema.js";
 
@@ -72,6 +73,27 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
     expect(second.backup).toBeNull();
     expect(eventCount(paths.dbPath)).toBe(inserted);
 
+  });
+
+  it("writes the v1 legacy tables T3 0.1.6 migrates from", async () => {
+    if (migration < 53) return;
+    const root = await mkdtemp(join(tmpdir(), "t3-import-legacy-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
+    const paths = createFixture(join(root, "t3"));
+    upgradeFixtureToV2(paths.dbPath);
+    await importConversations([{ conversation: canonicalConversation(workspace), resume: true }], paths, { dryRun: false, resume: true });
+    const db = new Database(paths.dbPath, { readonly: true });
+    try {
+      const thread = db.prepare("SELECT thread_id, title FROM projection_threads").all() as Array<{ thread_id: string; title: string }>;
+      expect(thread).toHaveLength(1);
+      const messages = db.prepare("SELECT role, text FROM projection_thread_messages ORDER BY created_at").all() as Array<{ role: string; text: string }>;
+      expect(messages).toEqual([{ role: "user", text: "Hello" }, { role: "assistant", text: "Hi" }]);
+      // v2 rows are left to the T3 migration bridge; writing them directly produced empty transcripts.
+      const v2 = db.prepare("SELECT COUNT(*) count FROM orchestration_v2_projection_threads").get() as { count: number };
+      expect(v2.count).toBe(0);
+    } finally { db.close(); }
   });
 
   it("fails closed on unknown migrations", async () => {
