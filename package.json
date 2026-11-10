@@ -1,7 +1,7 @@
 {
-  "name": "@carlosgtrz/t3-import",
-  "version": "0.4.1",
-  "description": "Import, synchronize, and safely replace Codex and Claude Code conversations in T3 Code",
+  "name": "t3-import",
+  "version": "0.5.2",
+  "description": "Import, synchronize, and safely replace Codex and Claude Code conversations in T3 Code (with Chinese localization, project folders, and target selection)",
   "keywords": [
     "t3code",
     "codex",
@@ -12,17 +12,17 @@
     "tui"
   ],
   "author": {
-    "name": "CarlosGtrz",
-    "url": "https://github.com/CarlosGtrz"
+    "name": "Erico",
+    "url": "https://github.com/EricoEC"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CarlosGtrz/t3-import.git"
+    "url": "git+https://github.com/EricoEC/t3-import.git"
   },
   "bugs": {
-    "url": "https://github.com/CarlosGtrz/t3-import/issues"
+    "url": "https://github.com/EricoEC/t3-import/issues"
   },
-  "homepage": "https://github.com/CarlosGtrz/t3-import#readme",
+  "homepage": "https://github.com/EricoEC/t3-import#readme",
   "type": "module",
   "bin": {
     "t3-import": "dist/cli.js"
