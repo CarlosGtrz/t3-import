@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import type {
   CanonicalConversation,
   CanonicalThread,
   ConversationSyncPreview,
+  SourceName,
   SyncItemResult,
   SyncRunResult,
   SyncSelection,
@@ -28,6 +29,7 @@ import {
   materializeAssets,
   planThread,
   projectionBacklog,
+  resolveSafeEventLimit,
   type PlannedThread,
 } from "./importer.js";
 
@@ -35,6 +37,8 @@ export interface SyncOptions extends TargetOverrides {
   dryRun: boolean;
   /** Internal TUI bridge: a preceding import in this process created the backlog. */
   allowProjectionBacklog?: boolean;
+  maxEvents?: number | undefined;
+  force?: boolean | undefined;
 }
 
 interface SyncPlan {
@@ -460,6 +464,44 @@ export async function inspectConversationSync(conversation: CanonicalConversatio
   } finally { db.close(); }
 }
 
+export function fastCheckImportedSessionIds(paths: TargetPaths, source: SourceName): Set<string> {
+  const imported = new Set<string>();
+  try {
+    for (const record of listImports(targetId(paths), source)) {
+      imported.add(record.sourceSessionId);
+    }
+  } catch {}
+  if (existsSync(paths.dbPath)) {
+    try {
+      const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const tableCheck = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_session_runtime'").get();
+        if (tableCheck) {
+          const runtimeRows = db.prepare("SELECT thread_id FROM provider_session_runtime").all() as Array<{ thread_id: string }>;
+          for (const row of runtimeRows) {
+            if (row.thread_id) imported.add(row.thread_id);
+          }
+        }
+        const eventTableCheck = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orchestration_events'").get();
+        if (eventTableCheck) {
+          const eventRows = db.prepare("SELECT metadata_json FROM orchestration_events WHERE aggregate_kind = 'thread' AND event_type = 'thread.created'").all() as Array<{ metadata_json: string }>;
+          for (const row of eventRows) {
+            try {
+              const meta = JSON.parse(row.metadata_json) as unknown;
+              if (isObject(meta) && isObject(meta.t3Import) && typeof meta.t3Import.sourceSessionId === "string") {
+                imported.add(meta.t3Import.sourceSessionId);
+              }
+            } catch {}
+          }
+        }
+      } finally {
+        db.close();
+      }
+    } catch {}
+  }
+  return imported;
+}
+
 export async function syncConversations(selections: SyncSelection[], paths: TargetPaths, options: SyncOptions): Promise<SyncRunResult> {
   await assertT3Closed(paths);
   const releaseLock = options.dryRun ? () => {} : acquireLock(paths);
@@ -476,7 +518,8 @@ export async function syncConversations(selections: SyncSelection[], paths: Targ
       const backlog = projectionBacklog(db);
       if (backlog.backlog > 0 && !options.allowProjectionBacklog) throw safetyError(`T3 has ${backlog.backlog} unprojected event${backlog.backlog === 1 ? "" : "s"}. Open T3 and let it finish loading before synchronizing.`);
       const count = eventPlans.reduce((sum, plan) => sum + plan.planned!.events.length, 0);
-      if (count > MAX_SAFE_IMPORT_EVENTS) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. Sync fewer conversations at a time.`);
+      const safeLimit = resolveSafeEventLimit(options.maxEvents, options.force);
+      if (count > safeLimit) throw safetyError(`Synchronization would append ${count} events, exceeding the safe one-launch limit of ${safeLimit}. Sync fewer conversations at a time, or use --force / --max-events.`);
     }
     if (options.dryRun) return { schemaVersion: 1, status: aggregate(plans.map((plan) => plan.result), true), target: paths.dbPath, migration: schema.migration, backup: null, results: plans.map((plan) => plan.result), warnings, hasConflicts: plans.some((plan) => hasConflict(plan.result.status)) };
     if (t3Plans.length > 0) backup = createBackup(db, paths);

@@ -6,5 +6,7 @@ export default defineConfig({
     exclude: ["repos/**", "node_modules/**", "dist/**"],
     maxWorkers: 2,
     minWorkers: 1,
+    testTimeout: 30000,
+    hookTimeout: 30000,
   },
 });

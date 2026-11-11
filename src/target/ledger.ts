@@ -166,6 +166,14 @@ function decodeRow(row: RawLedgerRow): StoredLedgerRecord {
   };
 }
 
+export function listImportedThreadIds(targetId: string): string[] {
+  const db = openLedger();
+  try {
+    const rows = db.prepare("SELECT thread_id FROM imports WHERE target_id = ? ORDER BY imported_at DESC").all(targetId) as Array<{ thread_id: string }>;
+    return rows.map((row) => row.thread_id);
+  } finally { db.close(); }
+}
+
 export function recordReplacement(oldRecord: StoredLedgerRecord, newRecord: LedgerRecord): void {
   recordConsolidation([oldRecord], newRecord);
 }

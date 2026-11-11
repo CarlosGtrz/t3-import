@@ -1,8 +1,9 @@
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import Database from "better-sqlite3";
 import type {
   CanonicalActivity,
   CanonicalConversation,
@@ -22,6 +23,7 @@ import {
   deriveTitle,
   isObject,
   isoTimestamp,
+  sanitizeMessageText,
   stringValue,
   truncate,
   type JsonObject,
@@ -347,11 +349,14 @@ function parseRows(
       const parsed = textParts(payload.content, role);
       if (!parsed.text && parsed.attachments.length === 0) continue;
       if (role === "user" && SYNTHETIC_PREFIXES.some((prefix) => parsed.text.startsWith(prefix))) continue;
+      const rawText = parsed.text || (parsed.attachments.length ? "[Image attachment]" : "");
+      const cleanedText = sanitizeMessageText(rawText);
+      if (!cleanedText && parsed.attachments.length === 0) continue;
       const turn = ensureTurn(timestamp, stringValue(payload.turn_id));
       const message: CanonicalMessage = {
         sourceId: stringValue(payload.id) ?? `message:${recordIndex}`,
         role,
-        text: parsed.text || "[Image attachment]",
+        text: cleanedText || (parsed.attachments.length ? "[Image attachment]" : ""),
         timestamp,
         attachments: parsed.attachments.map((attachment) => ({ ...attachment, sourceId: `${recordIndex}:${attachment.sourceId}` })),
       };
@@ -527,6 +532,151 @@ async function fastSummaries(options: DiscoveryOptions): Promise<SourceSummary[]
   return values.filter((value): value is SourceSummary => Boolean(value));
 }
 
+function toIsoDateString(val: unknown): string {
+  if (!val) return new Date(0).toISOString();
+  if (typeof val === "number") {
+    return new Date(val < 1e12 ? val * 1000 : val).toISOString();
+  }
+  const str = String(val);
+  const num = Number(str);
+  if (!isNaN(num) && num > 1e9) {
+    return new Date(num < 1e12 ? num * 1000 : num).toISOString();
+  }
+  try {
+    const parsed = new Date(str).toISOString();
+    return parsed;
+  } catch {
+    return new Date(0).toISOString();
+  }
+}
+
+async function databaseSummaries(options: DiscoveryOptions): Promise<SourceSummary[] | undefined> {
+  const root = codexRoot();
+  const dbPath = join(root, "state_5.sqlite");
+  if (!existsSync(dbPath)) return undefined;
+
+  let db: Database.Database;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch {
+    return undefined;
+  }
+
+  try {
+    const projectsRows = db.prepare("SELECT id, name, metadata FROM projects").all() as Array<{
+      id: string;
+      name: string | null;
+      metadata: string | null;
+    }>;
+    const projectsMap = new Map<string, string>();
+    for (const p of projectsRows) {
+      if (p.name) projectsMap.set(p.id, p.name);
+      try {
+        const meta = JSON.parse(p.metadata || "{}") as { "codex.localProjectId"?: string };
+        if (meta["codex.localProjectId"] && p.name) {
+          projectsMap.set(meta["codex.localProjectId"], p.name);
+        }
+      } catch {}
+    }
+
+    let assignments: Record<string, { projectId?: string }> = {};
+    let projectOrders: Record<string, { threadIds?: string[] }> = {};
+    const globalStatePath = join(root, ".codex-global-state.json");
+    if (existsSync(globalStatePath)) {
+      try {
+        const gs = JSON.parse(readFileSync(globalStatePath, "utf8")) as Record<string, any>;
+        assignments = gs["thread-project-assignments"] || {};
+        projectOrders = gs["sidebar-project-thread-orders"] || {};
+      } catch {}
+    }
+
+    const rows = db.prepare("SELECT id, name, title, rollout_path, cwd, archived, created_at, updated_at, updated_at_ms FROM threads").all() as Array<{
+      id: string;
+      name: string | null;
+      title: string | null;
+      rollout_path: string;
+      cwd: string | null;
+      archived: number | null;
+      created_at: number | string | null;
+      updated_at: number | string | null;
+      updated_at_ms: number | null;
+    }>;
+
+    const results: SourceSummary[] = [];
+    for (const row of rows) {
+      const id = row.id;
+      let path = row.rollout_path;
+      if (!existsSync(path)) {
+        const candidateSession = join(root, "sessions", basename(path));
+        const candidateArchived = join(root, "archived_sessions", basename(path));
+        if (existsSync(candidateSession)) path = candidateSession;
+        else if (existsSync(candidateArchived)) path = candidateArchived;
+        else continue;
+      }
+
+      const assignedProjId = assignments[id]?.projectId;
+      const projId = assignedProjId || undefined;
+      const projectName = (projId && projectsMap.get(projId)) || "未分类会话";
+
+      if (options.project && projectName !== options.project && projId !== options.project) continue;
+      if (options.workspace && canonicalPath(row.cwd || root) !== canonicalPath(options.workspace)) continue;
+      if (options.includeArchived === false && row.archived) continue;
+
+      const firstLine = row.title ? row.title.split("\n")[0] : undefined;
+      const title = row.name || (firstLine ? firstLine.slice(0, 100) : undefined) || `Codex conversation ${id.slice(0, 8)}`;
+      const createdAt = toIsoDateString(row.created_at);
+      const updatedAt = toIsoDateString(row.updated_at_ms || row.updated_at);
+
+      if (options.since && new Date(updatedAt) < options.since) continue;
+
+      results.push({
+        source: "codex",
+        id,
+        title,
+        workspace: row.cwd || root,
+        path,
+        createdAt,
+        updatedAt,
+        status: "complete",
+        branches: 1,
+        projectName,
+        projectId: projId,
+        archived: Boolean(row.archived),
+      });
+    }
+
+    if (options.project) {
+      let targetLocalId = options.project;
+      for (const [k, v] of projectsMap.entries()) {
+        if (v === options.project) {
+          targetLocalId = k;
+          break;
+        }
+      }
+      const orderList = projectOrders[targetLocalId]?.threadIds || projectOrders[options.project]?.threadIds;
+      if (orderList && Array.isArray(orderList)) {
+        const orderMap = new Map(orderList.map((tid, idx) => [tid, idx]));
+        results.sort((a, b) => {
+          const oa = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
+          const ob = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+          if (oa !== ob) return oa - ob;
+          return b.updatedAt.localeCompare(a.updatedAt);
+        });
+        return results;
+      }
+    }
+
+    results.sort((a, b) => {
+      if (a.archived !== b.archived) return a.archived ? 1 : -1;
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
+
+    return results;
+  } finally {
+    db.close();
+  }
+}
+
 export class CodexSource implements SourceAdapter {
   readonly name = "codex" as const;
   private appMetadata = new Map<string, CodexThreadMetadata>();
@@ -550,6 +700,11 @@ export class CodexSource implements SourceAdapter {
   }
 
   async discover(options: DiscoveryOptions): Promise<SourceSummary[]> {
+    const dbSummaries = await databaseSummaries(options);
+    if (dbSummaries !== undefined) {
+      return dbSummaries;
+    }
+
     const summaries = await fastSummaries(options);
     this.metadataWarmup ??= this.session()
       .then((session) => session.list(options.workspace))
@@ -573,9 +728,14 @@ export class CodexSource implements SourceAdapter {
       const fileStat = await stat(summary.path);
       const snapshot = await readStableJsonl(summary.path);
       let appThread: Record<string, unknown> | null = this.appMetadata.get(summary.id)?.raw ?? null;
-      try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }
+      if (!appThread && !summary.projectName && this.appSession !== undefined) {
+        try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }
+      }
       const thread = parseRows(snapshot.rows, summary.path, fileStat.mtime.toISOString(), options.includeIncomplete ?? false, appThread);
       if (!stringValue(appThread?.name)) thread.title = summary.title;
+      thread.projectName = summary.projectName;
+      thread.projectId = summary.projectId;
+      thread.archived = summary.archived;
       return { summary: { ...summary, title: thread.title, status: thread.ignoredInProgressTurns ? "incomplete" : "complete" }, threads: [thread], fingerprint: snapshot.fingerprint };
     } catch (error) {
       if (error instanceof Error && error.name === "ImporterError") throw error;

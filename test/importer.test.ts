@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { importConversations } from "../src/target/importer.js";
+import { importConversations, listActiveT3Projects } from "../src/target/importer.js";
 import { canonicalConversation, canonicalThread, createTarget, eventCount } from "./helpers.js";
+import { upgradeFixtureToV2 } from "./support/v2-fixture.js";
 
 import { SUPPORTED_MIGRATIONS } from "../src/target/schema.js";
 
@@ -74,9 +75,30 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
 
   });
 
+  it("writes the v1 legacy tables T3 0.1.6 migrates from", async () => {
+    if (migration < 53) return;
+    const root = await mkdtemp(join(tmpdir(), "t3-import-legacy-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    process.env.T3_IMPORT_DATA_DIR = join(root, "ledger");
+    const paths = createFixture(join(root, "t3"));
+    upgradeFixtureToV2(paths.dbPath);
+    await importConversations([{ conversation: canonicalConversation(workspace), resume: true }], paths, { dryRun: false, resume: true });
+    const db = new Database(paths.dbPath, { readonly: true });
+    try {
+      const thread = db.prepare("SELECT thread_id, title FROM projection_threads").all() as Array<{ thread_id: string; title: string }>;
+      expect(thread).toHaveLength(1);
+      const messages = db.prepare("SELECT role, text FROM projection_thread_messages ORDER BY created_at").all() as Array<{ role: string; text: string }>;
+      expect(messages).toEqual([{ role: "user", text: "Hello" }, { role: "assistant", text: "Hi" }]);
+      // v2 rows are left to the T3 migration bridge; writing them directly produced empty transcripts.
+      const v2 = db.prepare("SELECT COUNT(*) count FROM orchestration_v2_projection_threads").get() as { count: number };
+      expect(v2.count).toBe(0);
+    } finally { db.close(); }
+  });
+
   it("fails closed on unknown migrations", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-import-schema-"));
-    const paths = createFixture(join(root, "t3"), Math.max(...SUPPORTED_MIGRATIONS) + 1);
+    const paths = createFixture(join(root, "t3"), 39);
     await expect(importConversations([], paths, { dryRun: true, resume: true }))
       .rejects.toMatchObject({ exitCode: 3 });
   });
@@ -139,6 +161,20 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
       { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("safe one-launch limit") });
     expect(eventCount(paths.dbPath)).toBe(0);
+
+    const forcedResult = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
+      paths,
+      { dryRun: true, resume: true, force: true },
+    );
+    expect(forcedResult.status).toBe("dry-run");
+
+    const customLimitResult = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: true }],
+      paths,
+      { dryRun: true, resume: true, maxEvents: 5000 },
+    );
+    expect(customLimitResult.status).toBe("dry-run");
   });
 
   it("rejects new writes while T3 projections are behind", async () => {
@@ -159,5 +195,68 @@ describe.each(SUPPORTED_MIGRATIONS)("migration-%i writer", (migration) => {
       paths,
       { dryRun: true, resume: true },
     )).rejects.toMatchObject({ exitCode: 4, message: expect.stringContaining("unprojected event") });
+  });
+
+  it("imports threads into No project when noProject option is set", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-no-project-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createFixture(join(root, "t3"));
+    const thread = canonicalThread(workspace);
+    const result = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: false }],
+      paths,
+      { dryRun: false, resume: false, noProject: true },
+    );
+    expect(result.results[0]!.status).toBe("imported");
+    const db = new Database(paths.dbPath, { readonly: true });
+    const threadEvent = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.created'").get() as { payload: string };
+    const payload = JSON.parse(threadEvent.payload);
+    expect(payload.projectId).toBe("038044f3-eb38-49e9-a28e-5668f1420b6b");
+    const projectEvents = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE event_type='project.created'").get() as { count: number };
+    expect(projectEvents.count).toBe(0);
+    db.close();
+  });
+
+  it("imports threads into specified targetProjectId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-target-project-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    const paths = createFixture(join(root, "t3"));
+    const customProjectId = "99999999-9999-4999-8999-999999999999";
+    const thread = canonicalThread(workspace);
+    const result = await importConversations(
+      [{ conversation: canonicalConversation(workspace, thread), resume: false }],
+      paths,
+      { dryRun: false, resume: false, targetProjectId: customProjectId },
+    );
+    expect(result.results[0]!.status).toBe("imported");
+    const db = new Database(paths.dbPath, { readonly: true });
+    const threadEvent = db.prepare("SELECT payload_json payload FROM orchestration_events WHERE event_type='thread.created'").get() as { payload: string };
+    const payload = JSON.parse(threadEvent.payload);
+    expect(payload.projectId).toBe(customProjectId);
+    const projectEvents = db.prepare("SELECT COUNT(*) count FROM orchestration_events WHERE event_type='project.created'").get() as { count: number };
+    expect(projectEvents.count).toBe(0);
+    db.close();
+  });
+
+  it("lists active T3 projects from projection_projects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-import-list-projects-"));
+    const paths = createFixture(join(root, "t3"));
+    const db = new Database(paths.dbPath);
+    db.prepare("INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+      "test-proj-id-1", "测试项目1", "/tmp/ws1", "[]", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"
+    );
+    db.prepare("INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      "test-proj-id-del", "已删除项目", "/tmp/wsdel", "[]", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"
+    );
+    db.close();
+    const projects = listActiveT3Projects(paths);
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toEqual({
+      id: "test-proj-id-1",
+      title: "测试项目1",
+      workspaceRoot: "/tmp/ws1",
+    });
   });
 });

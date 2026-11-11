@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 import type {
   CanonicalActivity,
@@ -23,7 +24,7 @@ import type {
   ImportSelection,
   TargetPaths,
 } from "../core/types.js";
-import { canonicalPath, deterministicUuid, sha256, truncate } from "../core/util.js";
+import { canonicalPath, deterministicUuid, sanitizeMessageText, sha256, truncate } from "../core/util.js";
 import { checkpointForThread } from "../core/checkpoint.js";
 import { safetyError, writeError } from "../core/errors.js";
 import { resolveProviderSelection, type TargetOverrides } from "./config.js";
@@ -78,7 +79,7 @@ export interface PlannedThread {
 }
 
 export const MAX_SAFE_IMPORT_EVENTS = 900;
-export const IMPORTER_VERSION = "0.4.1";
+export const IMPORTER_VERSION = "0.5.3";
 const MAX_LAST_ERROR_LENGTH = 500;
 
 function settledSession(turn: CanonicalThread["turns"][number]): { status: "ready" | "interrupted" | "error"; lastError: string | null } {
@@ -164,10 +165,29 @@ export function compactThreadForImport(thread: CanonicalThread): CanonicalThread
 export interface ImportOptions extends TargetOverrides {
   dryRun: boolean;
   resume: boolean;
+  targetProjectId?: string | undefined;
+  noProject?: boolean | undefined;
+  maxEvents?: number | undefined;
+  force?: boolean | undefined;
+}
+
+export function resolveSafeEventLimit(customLimit?: number, force?: boolean): number {
+  if (force) return Number.MAX_SAFE_INTEGER;
+  if (typeof customLimit === "number" && customLimit > 0) return customLimit;
+  const envVal = process.env.T3_IMPORT_MAX_EVENTS;
+  if (envVal) {
+    const parsed = parseInt(envVal, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return MAX_SAFE_IMPORT_EVENTS;
 }
 
 export function projectionBacklog(db: Database.Database): { latestSequence: number; projectedSequence: number; backlog: number } {
   const latestSequence = Number((db.prepare("SELECT COALESCE(MAX(sequence), 0) value FROM orchestration_events").get() as { value: number }).value);
+  const hasProjectionState = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_state'").get());
+  if (!hasProjectionState) {
+    return { latestSequence, projectedSequence: latestSequence, backlog: 0 };
+  }
   // Newer T3 versions keep a separate attachment-cleanup retry cursor. It only
   // advances at bootstrap, not for live events, and is not a read-model cursor.
   const projected = db.prepare("SELECT MIN(last_applied_sequence) value FROM projection_state WHERE projector <> 'projection.attachment-cleanup'").get() as { value: number | null };
@@ -343,6 +363,36 @@ function existingProjectId(db: Database.Database, workspace: string): string | u
   })?.streamId;
 }
 
+export interface T3ProjectInfo {
+  id: string;
+  title: string;
+  workspaceRoot: string;
+}
+
+export function listActiveT3Projects(paths: TargetPaths): T3ProjectInfo[] {
+  if (!existsSync(paths.dbPath)) return [];
+  const db = new Database(paths.dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const hasTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projection_projects'").get());
+    if (!hasTable) return [];
+    const rows = db.prepare("SELECT project_id id, title, workspace_root workspaceRoot FROM projection_projects WHERE deleted_at IS NULL ORDER BY updated_at DESC").all() as T3ProjectInfo[];
+    return rows;
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+function existingProjectByName(db: Database.Database, projectName: string): string | undefined {
+  const row = db.prepare("SELECT project_id projectId FROM projection_projects WHERE title = ? AND deleted_at IS NULL").get(projectName) as { projectId: string } | undefined;
+  if (row) return row.projectId;
+  const pending = db.prepare("SELECT stream_id streamId, payload_json payload FROM orchestration_events WHERE event_type = 'project.created'").all() as Array<{ streamId: string; payload: string }>;
+  return pending.find((p) => {
+    try { const val = JSON.parse(p.payload) as { title?: string }; return val.title === projectName; } catch { return false; }
+  })?.streamId;
+}
+
 function isImported(db: Database.Database, sourceKey: string, thread: CanonicalThread, threadId: string): boolean {
   const marker = deterministicUuid(`t3-import:event:${sourceKey}:thread.created`);
   const found = db.prepare("SELECT 1 found FROM orchestration_events WHERE event_id = ? OR (stream_id = ? AND event_type = 'thread.created') LIMIT 1").get(marker, threadId);
@@ -446,18 +496,35 @@ export async function importConversations(
           ? thread.sourceSessionId
           : deterministicUuid(`t3-import:thread:${thread.sourceKey}`);
         const imported = isImported(db, thread.sourceKey, thread, threadId);
-        const workspaceKey = canonicalPath(thread.workspace);
-        let projectId = projectIds.get(workspaceKey) ?? existingProjectId(db, thread.workspace);
-        if (!projectId) projectId = deterministicUuid(`t3-import:project:${workspaceKey}`);
-        projectIds.set(workspaceKey, projectId);
         const provider = resolveProviderSelection(paths, thread.source, thread.model, thread.effort, options.providerInstance);
         const seed = thread.sourceKey;
-        const projectEvent = !imported && !existingProjectId(db, thread.workspace) && !plannedProjectEvents.has(projectId)
-          ? event(`project:${workspaceKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
-              projectId, title: basename(thread.workspace), workspaceRoot: thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
-            })
-          : undefined;
-        if (projectEvent) plannedProjectEvents.add(projectId);
+        let projectId: string;
+        let projectEvent: PlannedEvent | undefined;
+
+        if (options.noProject) {
+          const noProjectRow = db.prepare("SELECT project_id projectId FROM projection_projects WHERE (title = 'No project' OR title = '无项目') AND deleted_at IS NULL").get() as { projectId: string } | undefined;
+          projectId = noProjectRow?.projectId ?? "038044f3-eb38-49e9-a28e-5668f1420b6b";
+        } else if (options.targetProjectId) {
+          projectId = options.targetProjectId;
+        } else {
+          const workspaceKey = canonicalPath(thread.workspace);
+          const isNamedProject = Boolean(thread.projectName && thread.projectName !== "未分类会话");
+          const projectKey = isNamedProject ? `named:${thread.projectName}` : workspaceKey;
+          let id = projectIds.get(projectKey) ?? (isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace));
+          if (!id) id = deterministicUuid(`t3-import:project:${projectKey}`);
+          projectIds.set(projectKey, id);
+          projectId = id;
+          const projectTitle = isNamedProject ? thread.projectName! : basename(thread.workspace);
+          const alreadyHasProject = Boolean(
+            isNamedProject ? existingProjectByName(db, thread.projectName!) : existingProjectId(db, thread.workspace)
+          );
+          if (!imported && !alreadyHasProject && !plannedProjectEvents.has(projectId)) {
+            projectEvent = event(`project:${projectKey}`, "project.created", "project", projectId, "project.created", thread.createdAt, "client", {
+              projectId, title: projectTitle, workspaceRoot: thread.workspace, defaultModelSelection: modelSelection(provider), scripts: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt,
+            });
+            plannedProjectEvents.add(projectId);
+          }
+        }
         const resumable = options.resume && selection.resume && thread.currentBranch && Boolean(thread.resumeCursor);
         const plan = planThread(thread, threadId, projectId, paths, provider, seed, projectEvent, resumable, selection.conversation.fingerprint);
         plan.alreadyImported = imported;
@@ -492,10 +559,11 @@ export async function importConversations(
         );
       }
       const plannedEventCount = toWrite.reduce((sum, plan) => sum + plan.events.length, 0);
-      if (plannedEventCount > MAX_SAFE_IMPORT_EVENTS) {
+      const safeLimit = resolveSafeEventLimit(options.maxEvents, options.force);
+      if (plannedEventCount > safeLimit) {
         throw safetyError(
-          `The compact import would append ${plannedEventCount} events, exceeding the safe one-launch limit of ${MAX_SAFE_IMPORT_EVENTS}. ` +
-          "Import fewer conversations at a time or select shorter histories.",
+          `The compact import would append ${plannedEventCount} events, exceeding the safe one-launch limit of ${safeLimit}. ` +
+          "Import fewer conversations at a time, select shorter histories, or use --force / --max-events.",
         );
       }
     }
@@ -517,8 +585,7 @@ export async function importConversations(
         ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
       `);
       const upsertRuntime = db.prepare(`
-        INSERT INTO provider_session_runtime (
-          thread_id, provider_name, provider_instance_id, adapter_key,
+        INSERT INTO provider_session_runtime (\n          thread_id, provider_name, provider_instance_id, adapter_key,
           runtime_mode, status, last_seen_at, resume_cursor_json, runtime_payload_json
         ) VALUES (?, ?, ?, ?, 'full-access', 'stopped', ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
@@ -531,6 +598,58 @@ export async function importConversations(
           resume_cursor_json=excluded.resume_cursor_json,
           runtime_payload_json=excluded.runtime_payload_json
       `);
+      const hasV2Projection = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orchestration_v2_projection_threads'").get());
+      const hasTable = (name: string): boolean => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+      const hasLegacyBridge = hasTable("projection_threads") && hasTable("projection_thread_messages") && hasTable("orchestration_v2_legacy_imports");
+      const upsertLegacyThread = hasLegacyBridge ? db.prepare(`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, worktree_path, created_at, updated_at,
+          runtime_mode, interaction_mode, model_selection_json,
+          latest_user_message_at, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'full-access', 'default', ?, ?, NULL)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          project_id = excluded.project_id,
+          title = excluded.title,
+          worktree_path = excluded.worktree_path,
+          updated_at = excluded.updated_at,
+          runtime_mode = excluded.runtime_mode,
+          interaction_mode = excluded.interaction_mode,
+          model_selection_json = excluded.model_selection_json,
+          latest_user_message_at = excluded.latest_user_message_at,
+          deleted_at = NULL
+      `) : null;
+      const upsertLegacyMessage = hasLegacyBridge ? db.prepare(`
+        INSERT OR REPLACE INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming,
+          created_at, updated_at, attachments_json, context_json
+        ) VALUES (?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL)
+      `) : null;
+      const upsertV2Thread = hasV2Projection ? db.prepare(`
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode,
+          interaction_mode, active_provider_thread_id, created_at, updated_at,
+          archived_at, deleted_at, payload_json, provider_instance_id
+        ) VALUES (?, ?, ?, ?, 'full-access', 'default', ?, ?, ?, NULL, NULL, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          project_id = excluded.project_id,
+          title = excluded.title,
+          default_provider = excluded.default_provider,
+          active_provider_thread_id = excluded.active_provider_thread_id,
+          updated_at = excluded.updated_at,
+          payload_json = excluded.payload_json,
+          provider_instance_id = excluded.provider_instance_id
+      `) : null;
+      const upsertV2Message = hasV2Projection ? db.prepare(`
+        INSERT OR REPLACE INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+      `) : null;
+      const upsertV2Project = hasV2Projection ? db.prepare(`
+        INSERT OR IGNORE INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (?, ?, ?, '[]', ?, ?, NULL)
+      `) : null;
       const streamVersions = new Map<string, number>();
       db.transaction(() => {
         for (const plan of toWrite) {
@@ -545,9 +664,157 @@ export async function importConversations(
             lastSequence = Math.max(lastSequence, sequence);
             streamVersions.set(streamKey, version + 1);
           }
+          let safeCwd = plan.thread.workspace;
+          if (!existsSync(safeCwd)) {
+            const projectRow = hasV2Projection ? db.prepare("SELECT workspace_root FROM projection_projects WHERE project_id = ?").get(plan.projectId) as { workspace_root: string } | undefined : undefined;
+            if (projectRow?.workspace_root && existsSync(projectRow.workspace_root)) {
+              safeCwd = projectRow.workspace_root;
+            } else {
+              safeCwd = process.env.HOME || homedir();
+            }
+          }
+          const effectiveWorktreePath = existsSync(plan.thread.workspace) && plan.thread.workspace !== safeCwd
+            ? plan.thread.workspace
+            : null;
+
           if (plan.resumable && plan.thread.resumeCursor) {
             const cursor = plan.thread.source === "claude" ? { threadId: plan.threadId, ...plan.thread.resumeCursor } : plan.thread.resumeCursor;
-            upsertRuntime.run(plan.threadId, plan.provider.providerName, plan.provider.instanceId, plan.provider.adapterKey, plan.thread.updatedAt, JSON.stringify(cursor), JSON.stringify({ cwd: plan.thread.workspace, model: plan.provider.model, activeTurnId: null, lastError: null, modelSelection: modelSelection(plan.provider), lastRuntimeEvent: `t3-import.${plan.thread.source}`, lastRuntimeEventAt: plan.thread.updatedAt }));
+            upsertRuntime.run(plan.threadId, plan.provider.providerName, plan.provider.instanceId, plan.provider.adapterKey, plan.thread.updatedAt, JSON.stringify(cursor), JSON.stringify({ cwd: safeCwd, model: plan.provider.model, activeTurnId: null, lastError: null, modelSelection: modelSelection(plan.provider), lastRuntimeEvent: `t3-import.${plan.thread.source}`, lastRuntimeEventAt: plan.thread.updatedAt }));
+          }
+          if (hasV2Projection && upsertV2Project) {
+            upsertV2Project.run(plan.projectId, basename(plan.thread.workspace), plan.thread.workspace, plan.thread.createdAt, plan.thread.updatedAt);
+            const activeProviderThreadId = plan.resumable && plan.thread.source === "codex" ? plan.thread.sourceSessionId : null;
+            // "import" is not a valid T3 creationSource; T3 validates this enum and a single
+            // bad value breaks the whole shell projection (empty sidebar).
+            const threadPayload = {
+              createdBy: "user",
+              creationSource: "server",
+              id: plan.threadId,
+              projectId: plan.projectId,
+              title: plan.thread.title,
+              providerInstanceId: plan.provider.instanceId,
+              modelSelection: modelSelection(plan.provider),
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: effectiveWorktreePath,
+              pullRequests: [],
+              activeProviderThreadId,
+              lineage: {
+                parentThreadId: null,
+                relationshipToParent: null,
+                rootThreadId: plan.threadId,
+              },
+              forkedFrom: null,
+              createdAt: plan.thread.createdAt,
+              updatedAt: plan.thread.updatedAt,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: plan.thread.updatedAt,
+              unsettledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+              pinnedAt: null,
+              pinOrderKey: null,
+              activeOrderKey: null,
+              lastVisitedAt: plan.thread.updatedAt,
+              opens: { openedAt: Date.now(), score: 1, picks: [] },
+              titleRegeneration: null,
+              deletedAt: null,
+            };
+
+            if (hasLegacyBridge && upsertLegacyThread && upsertLegacyMessage) {
+              // T3 0.1.6 rebuilds its orchestration-v2 timeline from these legacy v1 tables
+              // on startup (reconcileShells -> ensureTranscript). Writing only the v2
+              // projection leaves threads with an empty transcript.
+              upsertLegacyThread.run(
+                plan.threadId,
+                plan.projectId,
+                plan.thread.title,
+                effectiveWorktreePath,
+                plan.thread.createdAt,
+                plan.thread.updatedAt,
+                JSON.stringify(modelSelection(plan.provider)),
+                plan.thread.updatedAt,
+              );
+              for (const turn of plan.thread.turns) {
+                const userMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:user`);
+                upsertLegacyMessage.run(
+                  userMsgId,
+                  plan.threadId,
+                  "user",
+                  sanitizeMessageText(turn.user.text),
+                  turn.user.timestamp,
+                  turn.user.timestamp,
+                  JSON.stringify(turn.user.attachments ?? []),
+                );
+                turn.assistant.forEach((assistantMsg, msgIndex) => {
+                  const assistantMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:assistant:${assistantMsg.sourceId || msgIndex}`);
+                  upsertLegacyMessage.run(
+                    assistantMsgId,
+                    plan.threadId,
+                    "assistant",
+                    sanitizeMessageText(assistantMsg.text),
+                    assistantMsg.timestamp,
+                    assistantMsg.timestamp,
+                    JSON.stringify(assistantMsg.attachments ?? []),
+                  );
+                });
+              }
+            } else if (upsertV2Thread && upsertV2Message) {
+              upsertV2Thread.run(
+                plan.threadId,
+                plan.projectId,
+                plan.thread.title,
+                plan.provider.providerName,
+                activeProviderThreadId,
+                plan.thread.createdAt,
+                plan.thread.updatedAt,
+                JSON.stringify(threadPayload),
+                plan.provider.instanceId,
+              );
+              plan.thread.turns.forEach((turn, turnIndex) => {
+                const runId = `run:thread:${plan.threadId}:ordinal:${turnIndex + 1}`;
+                const userMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:user`);
+                const userNodeId = `node:run:${runId}:root`;
+                const userPayload = {
+                  createdBy: "user",
+                  creationSource: "user",
+                  id: userMsgId,
+                  threadId: plan.threadId,
+                  runId,
+                  nodeId: userNodeId,
+                  role: "user",
+                  text: turn.user.text,
+                  context: { version: 1, records: [] },
+                  attachments: turn.user.attachments || [],
+                  streaming: false,
+                  createdAt: turn.user.timestamp,
+                  updatedAt: turn.user.timestamp,
+                };
+                upsertV2Message.run(userMsgId, plan.threadId, runId, userNodeId, "user", turn.user.timestamp, turn.user.timestamp, JSON.stringify(userPayload));
+                turn.assistant.forEach((assistantMsg, msgIndex) => {
+                  const assistantMsgId = deterministicUuid(`t3-import:message:${plan.thread.sourceKey}:${turn.id}:assistant:${assistantMsg.sourceId || msgIndex}`);
+                  const assistantNodeId = `node:provider:${plan.provider.providerName}:item:${assistantMsgId}`;
+                  const assistantPayload = {
+                    createdBy: "agent",
+                    creationSource: "provider",
+                    id: assistantMsgId,
+                    threadId: plan.threadId,
+                    runId,
+                    nodeId: assistantNodeId,
+                    role: "assistant",
+                    text: assistantMsg.text,
+                    context: { version: 1, records: [] },
+                    attachments: assistantMsg.attachments || [],
+                    streaming: false,
+                    createdAt: assistantMsg.timestamp,
+                    updatedAt: assistantMsg.timestamp,
+                  };
+                  upsertV2Message.run(assistantMsgId, plan.threadId, runId, assistantNodeId, "assistant", assistantMsg.timestamp, assistantMsg.timestamp, JSON.stringify(assistantPayload));
+                });
+              });
+            }
           }
           const result = results.find((entry) => entry.threadId === plan.threadId)!;
           result.sequence = { first: firstSequence, last: lastSequence };

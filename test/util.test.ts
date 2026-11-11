@@ -3,10 +3,20 @@ import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { canonicalPath, deterministicUuid, pathContains } from "../src/core/util.js";
+import { canonicalPath, deterministicUuid, pathContains, sanitizeMessageText } from "../src/core/util.js";
 import { resolveT3Launch } from "../src/target/launch.js";
 
 describe("core utilities", () => {
+  it("sanitizes Codex private tags and wrapper prefixes", () => {
+    const rawAssistant = "Here is the answer.\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1-10\n</citation_entries>\n</oai-mem-citation>";
+    expect(sanitizeMessageText(rawAssistant)).toBe("Here is the answer.");
+
+    const rawTool = "Opening page...<external_codex_apps_open_page>https://example.com</external_codex_apps_open_page> Done!";
+    expect(sanitizeMessageText(rawTool)).toBe("Opening page... Done!");
+
+    const rawUser = "# Files mentioned by the user:\n## file.txt: /path/file.txt\n\nDistinguish instructions...\n## My request:\nHello world!";
+    expect(sanitizeMessageText(rawUser)).toBe("Hello world!");
+  });
   it("honors the explicit T3 Code executable override", () => {
     expect(resolveT3Launch({ T3_CODE_BIN: "/opt/t3/T3 Code" }, "linux", "/home/test")).toEqual({
       command: "/opt/t3/T3 Code",
