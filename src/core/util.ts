@@ -59,6 +59,22 @@ export function truncate(value: string, limit = 180): string {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
 }
 
+export function sanitizeMessageText(input: string): string {
+  if (typeof input !== "string" || !input) return "";
+  let text = input;
+  // 1. Remove Codex internal memory citations and external app calls
+  text = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, "");
+  text = text.replace(/<external_codex_apps_open_page>[\s\S]*?<\/external_codex_apps_open_page>/gi, "");
+
+  // 2. Clean Codex desktop wrapper template prefixes if present
+  // e.g. "# Files mentioned by the user:\n...\n## My request:\nActual text"
+  if (text.includes("## My request:")) {
+    const parts = text.split("## My request:");
+    text = parts[parts.length - 1] ?? text;
+  }
+  return text.trim();
+}
+
 export function deriveTitle(text: string, fallback = "Imported conversation"): string {
   const line = text.split(/\r?\n/u).find((entry) => entry.trim().length > 0)?.trim() ?? fallback;
   return truncate(line, 72);

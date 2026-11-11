@@ -79,7 +79,7 @@ async function attachCacheReset<T extends ImportRunResult | SyncRunResult | Repl
 
 program
   .name("t3-import")
-  .description("将 Codex 和 Claude Code 的会话记录导入、同步并安全替换至 T3 Code 中（Erico：中文汉化）")
+  .description("将 Codex 和 Claude Code 的会话记录导入、同步并安全替换至 T3 Code 中（支持项目文件夹映射、自选目标项目与智能修复）")
   .version(IMPORTER_VERSION)
   .option("--t3-home <path>", "T3 安装/数据根目录 (默认 ~/.t3)")
   .option("--db <path>", "T3 数据库文件路径 (默认 ~/.t3/userdata/statev2.sqlite)")
@@ -166,7 +166,8 @@ program.command("repair")
   .description("修复旧版导入的会话（正文为空 / 侧边栏消失 / creationSource 非法）")
   .option("--dry-run", "只检查，不写入数据库")
   .option("--yes", "跳过交互式确认")
-  .action(async (options: { dryRun?: boolean; yes?: boolean }) => {
+  .option("--force", "跳过 T3 关闭检查直接写入数据库")
+  .action(async (options: { dryRun?: boolean; yes?: boolean; force?: boolean }) => {
     if (!options.dryRun && !options.yes) {
       if (!process.stdout.isTTY || isJson()) throw usageError("非交互模式修复需要指定 --yes。");
       const prompt = createInterface({ input, output });
@@ -175,7 +176,10 @@ program.command("repair")
       finally { prompt.close(); }
       if (!confirmed) return;
     }
-    const result = await repairImportedThreads(resolveTargetPaths(globalOverrides()), { dryRun: Boolean(options.dryRun) });
+    const result = await repairImportedThreads(resolveTargetPaths(globalOverrides()), {
+      dryRun: Boolean(options.dryRun),
+      force: Boolean(options.force),
+    });
     if (isJson()) { print(result); return; }
     if (result.status === "noop") { print("未发现需要修复的导入会话。"); return; }
     const lines = [
@@ -185,6 +189,8 @@ program.command("repair")
       `涉及会话：${result.threads}`,
       `补齐 v1 旧表：${result.legacyThreads} 个会话 / ${result.legacyMessages} 条消息`,
       `修正非法 creationSource：${result.fixedSources}`,
+      result.clearedWorktrees ? `清理失效工作区：${result.clearedWorktrees} 个` : "",
+      result.sanitizedMessages ? `净化私有标签消息：${result.sanitizedMessages} 条` : "",
       `清理无效 v2 投影行：${result.droppedProjectionRows}`,
       "",
       ...result.details.map((item) => `✓ ${item.title} — ${item.actions.join("；")}`),

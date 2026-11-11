@@ -1,7 +1,7 @@
 {
   "name": "@carlosgtrz/t3-import",
   "version": "0.5.3",
-  "description": "Import, synchronize, and safely replace Codex and Claude Code conversations in T3 Code",
+"description": "Import, synchronize, and safely replace Codex and Claude Code conversations in T3 Code (with project folders, target selection, and smart repair)",
   "keywords": [
     "t3code",
     "codex",

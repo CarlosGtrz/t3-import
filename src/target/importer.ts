@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 import type {
   CanonicalActivity,
@@ -23,7 +24,7 @@ import type {
   ImportSelection,
   TargetPaths,
 } from "../core/types.js";
-import { canonicalPath, deterministicUuid, sha256, truncate } from "../core/util.js";
+import { canonicalPath, deterministicUuid, sanitizeMessageText, sha256, truncate } from "../core/util.js";
 import { checkpointForThread } from "../core/checkpoint.js";
 import { safetyError, writeError } from "../core/errors.js";
 import { resolveProviderSelection, type TargetOverrides } from "./config.js";
@@ -663,9 +664,22 @@ export async function importConversations(
             lastSequence = Math.max(lastSequence, sequence);
             streamVersions.set(streamKey, version + 1);
           }
+          let safeCwd = plan.thread.workspace;
+          if (!existsSync(safeCwd)) {
+            const projectRow = hasV2Projection ? db.prepare("SELECT workspace_root FROM projection_projects WHERE project_id = ?").get(plan.projectId) as { workspace_root: string } | undefined : undefined;
+            if (projectRow?.workspace_root && existsSync(projectRow.workspace_root)) {
+              safeCwd = projectRow.workspace_root;
+            } else {
+              safeCwd = process.env.HOME || homedir();
+            }
+          }
+          const effectiveWorktreePath = existsSync(plan.thread.workspace) && plan.thread.workspace !== safeCwd
+            ? plan.thread.workspace
+            : null;
+
           if (plan.resumable && plan.thread.resumeCursor) {
             const cursor = plan.thread.source === "claude" ? { threadId: plan.threadId, ...plan.thread.resumeCursor } : plan.thread.resumeCursor;
-            upsertRuntime.run(plan.threadId, plan.provider.providerName, plan.provider.instanceId, plan.provider.adapterKey, plan.thread.updatedAt, JSON.stringify(cursor), JSON.stringify({ cwd: plan.thread.workspace, model: plan.provider.model, activeTurnId: null, lastError: null, modelSelection: modelSelection(plan.provider), lastRuntimeEvent: `t3-import.${plan.thread.source}`, lastRuntimeEventAt: plan.thread.updatedAt }));
+            upsertRuntime.run(plan.threadId, plan.provider.providerName, plan.provider.instanceId, plan.provider.adapterKey, plan.thread.updatedAt, JSON.stringify(cursor), JSON.stringify({ cwd: safeCwd, model: plan.provider.model, activeTurnId: null, lastError: null, modelSelection: modelSelection(plan.provider), lastRuntimeEvent: `t3-import.${plan.thread.source}`, lastRuntimeEventAt: plan.thread.updatedAt }));
           }
           if (hasV2Projection && upsertV2Project) {
             upsertV2Project.run(plan.projectId, basename(plan.thread.workspace), plan.thread.workspace, plan.thread.createdAt, plan.thread.updatedAt);
@@ -683,7 +697,7 @@ export async function importConversations(
               runtimeMode: "full-access",
               interactionMode: "default",
               branch: null,
-              worktreePath: plan.thread.workspace,
+              worktreePath: effectiveWorktreePath,
               pullRequests: [],
               activeProviderThreadId,
               lineage: {
@@ -717,7 +731,7 @@ export async function importConversations(
                 plan.threadId,
                 plan.projectId,
                 plan.thread.title,
-                plan.thread.workspace,
+                effectiveWorktreePath,
                 plan.thread.createdAt,
                 plan.thread.updatedAt,
                 JSON.stringify(modelSelection(plan.provider)),
@@ -729,7 +743,7 @@ export async function importConversations(
                   userMsgId,
                   plan.threadId,
                   "user",
-                  turn.user.text,
+                  sanitizeMessageText(turn.user.text),
                   turn.user.timestamp,
                   turn.user.timestamp,
                   JSON.stringify(turn.user.attachments ?? []),
@@ -740,7 +754,7 @@ export async function importConversations(
                     assistantMsgId,
                     plan.threadId,
                     "assistant",
-                    assistantMsg.text,
+                    sanitizeMessageText(assistantMsg.text),
                     assistantMsg.timestamp,
                     assistantMsg.timestamp,
                     JSON.stringify(assistantMsg.attachments ?? []),

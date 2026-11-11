@@ -22,10 +22,14 @@
   - **放入已有项目**：动态读取当前 T3 现存活跃项目列表，一键精准归类。
 - **📦 已归档会话智能折叠**：
   - 列表默认折叠已归档历史会话，按 `h` 键可随时展开/收起；全选快捷键 `a` 仅对可见项生效。
+- **🧹 Codex 私有标签与模板自动净化**：
+  - 自动剥离 `<oai-mem-citation>`、`<external_codex_apps_open_page>` 等非正文工具与内部记忆标签，并净化桌面版 Codex 注入的模板前缀（如 `# Files mentioned by the user:...## My request:`），还原真实干净的用户提示词与助手回复。
+- **🛠️ 失效工作区与会话修复保护**：
+  - 自动识别并清理失效的 Codex 沙盒临时工作区死路径，回退绑定至宿主项目根目录或合法环境，杜绝 T3 Code `This thread's workspace folder no longer exists` 导致的打不开与崩溃。
 - **⚡ 超大对话流式引擎**：
   - 采用流式 SHA-256 指纹计算与分批处理，安全支持 >500MB+ 巨型对话，无内存溢出风险。
 - **🔄 全生命周期管理**：
-  - 支持初次导入（`import`）、增量续聊追加（`sync`）以及旧任务整聊无损替换（`replace`）。
+  - 支持初次导入（`import`）、增量续聊追加（`sync`）、旧任务整聊无损替换（`replace`）以及一键修复旧会话（`repair`）。
 - **🛡️ 严格的数据安全防线**：
   - 仅在 T3 关闭状态下执行；每次操作前自动创建 SQLite 校验快照备份，安全重置 IndexedDB 缓存。
 
@@ -46,8 +50,14 @@
 #### 安装与启动
 
 ```bash
-# 全局安装
-npm install --global @carlosgtrz/t3-import
+# 全局安装 (从 npm 或本地源码)
+npm install --global t3-import
+
+# 或直接克隆源码本地运行
+git clone https://github.com/EricoEC/t3-import.git
+cd t3-import
+npm install && npm run build
+npm install -g .
 
 # 启动交互式终端界面（推荐）
 t3-import
@@ -150,8 +160,14 @@ t3-import cache reset --yes
 #### Installation & Launch
 
 ```bash
-# Global install
-npm install --global @carlosgtrz/t3-import
+# Global install (from npm or local build)
+npm install --global t3-import
+
+# Or clone and run locally
+git clone https://github.com/EricoEC/t3-import.git
+cd t3-import
+npm install && npm run build
+npm install -g .
 
 # Launch interactive TUI (Recommended)
 t3-import
@@ -205,7 +221,16 @@ t3-import cache reset --yes
 
 ---
 
-## 鸣谢 / Acknowledgements
+## 贡献与鸣谢 / Contributions & Acknowledgements
 
-本项目基于 [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import) 架构进行二次开发与深度重构，扩展了 Codex 项目文件夹识别、会话大标题解析、自选目标项目归属、超大对话流式引擎以及完整中文本地化支持。  
-*This project is built upon and extended from [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import), adding Codex project folders, conversation title mapping, flexible target project routing, streaming large-file processing, and bilingual localization.*
+- **开发者 / Developer**：[Erico](https://github.com/EricoEC)
+- **核心开发与功能实现**：
+  - 深度适配 Codex 项目文件夹与会话大标题精准解析映射
+  - 自由选择导入目标（自动创建同名项目 / 无项目独立对话 / 归入已有活跃项目）
+  - 超大对话流式指纹计算与批处理引擎（安全支持 >500MB 对话）
+  - Codex 私有记忆与工具标签（`<oai-mem-citation>` / `<external_codex_apps_open_page>`）及桌面模板前缀自动净化
+  - 失效工作区死路径检测与宿主项目根路径安全回退保护
+  - 完整双语国际化支持与 T3 0.1.6 投影层兼容
+- **致谢 / Acknowledgements**：
+  - 本工具底层基础结构与初始原型参考自 [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import) 的开源工作，特此鸣谢。
+  - *Special thanks to [CarlosGtrz/t3-import](https://github.com/CarlosGtrz/t3-import) for the initial prototype and architecture reference.*

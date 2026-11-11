@@ -23,6 +23,7 @@ import {
   deriveTitle,
   isObject,
   isoTimestamp,
+  sanitizeMessageText,
   stringValue,
   truncate,
   type JsonObject,
@@ -348,11 +349,14 @@ function parseRows(
       const parsed = textParts(payload.content, role);
       if (!parsed.text && parsed.attachments.length === 0) continue;
       if (role === "user" && SYNTHETIC_PREFIXES.some((prefix) => parsed.text.startsWith(prefix))) continue;
+      const rawText = parsed.text || (parsed.attachments.length ? "[Image attachment]" : "");
+      const cleanedText = sanitizeMessageText(rawText);
+      if (!cleanedText && parsed.attachments.length === 0) continue;
       const turn = ensureTurn(timestamp, stringValue(payload.turn_id));
       const message: CanonicalMessage = {
         sourceId: stringValue(payload.id) ?? `message:${recordIndex}`,
         role,
-        text: parsed.text || "[Image attachment]",
+        text: cleanedText || (parsed.attachments.length ? "[Image attachment]" : ""),
         timestamp,
         attachments: parsed.attachments.map((attachment) => ({ ...attachment, sourceId: `${recordIndex}:${attachment.sourceId}` })),
       };
